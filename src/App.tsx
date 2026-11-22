@@ -287,7 +287,7 @@ function AudioPlayer({ recording }: { recording: Recording }) {
               borderRadius: '9999px',
             }}
           />
-          <div className="mt-1.5 flex items-center justify-between text-[11px] font-mono tabular-nums text-[var(--ink-muted)]">
+          <div className="mt-1.5 flex items-center justify-between text-[12px] font-mono tabular-nums text-[var(--ink-muted)]">
             <span>{formatDuration(currentTime)}</span>
             <span>{formatDuration(displayDuration)}</span>
           </div>
@@ -298,7 +298,7 @@ function AudioPlayer({ recording }: { recording: Recording }) {
           onClick={cycleRate}
           aria-label={`Playback speed ${playbackRate}x`}
           title="Change playback speed"
-          className="flex h-9 min-w-[46px] shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2 font-mono text-[11.5px] font-medium tabular-nums text-[var(--ink-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+          className="flex h-9 min-w-[48px] shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2 font-mono text-[12.5px] font-medium tabular-nums text-[var(--ink-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--ink)] transition-colors cursor-pointer"
         >
           {playbackRate}×
         </button>
@@ -327,22 +327,22 @@ function MarkdownPreview({
     <div className="rounded-2xl border border-[var(--border)] bg-[var(--code-bg)] overflow-hidden">
       <div className="flex items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-2.5 bg-[var(--surface-subtle)]/60">
         <div className="flex items-center gap-2 min-w-0">
-          <FileText className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]" />
-          <span className="truncate font-mono text-[11.5px] text-[var(--ink-secondary)]">
+          <FileText className="h-4 w-4 shrink-0 text-[var(--ink-muted)]" />
+          <span className="truncate font-mono text-[12.5px] text-[var(--ink-secondary)]">
             {filename}
           </span>
         </div>
         <button
           type="button"
           onClick={onCopy}
-          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] font-medium text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] transition-colors shrink-0 cursor-pointer"
+          className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12.5px] font-medium text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] transition-colors shrink-0 cursor-pointer"
         >
           {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
 
-      <pre className="p-4 sm:p-5 text-[12.5px] leading-[1.72] font-mono overflow-x-auto whitespace-pre-wrap break-words text-[var(--ink)]">
+      <pre className="p-4 sm:p-5 text-[13.5px] leading-[1.75] font-mono overflow-x-auto whitespace-pre-wrap break-words text-[var(--ink)]">
         {lines.map((line, index) => {
           if (index === 0 && line === '---') {
             inFrontmatter = true;
@@ -1126,10 +1126,10 @@ export default function App() {
           <div className="flex items-center gap-2.5">
             <TapeleafMark />
             <div className="flex items-baseline gap-2">
-              <h1 className="text-[16px] font-semibold tracking-[-0.02em] text-[var(--ink)]">
+              <h1 className="text-[17.5px] font-semibold tracking-[-0.02em] text-[var(--ink)]">
                 Tapeleaf
               </h1>
-              <span className="text-[11.5px] font-mono tabular-nums text-[var(--ink-muted)]">
+              <span className="text-[12.5px] font-mono tabular-nums text-[var(--ink-muted)]">
                 {recordings.length}
               </span>
             </div>
@@ -1180,7 +1180,7 @@ export default function App() {
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search titles, transcripts, #tags…"
               aria-label="Search voice notes"
-              className="h-10 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] pl-9 pr-9 text-[13.5px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--border-strong)] focus:outline-none transition-colors"
+              className="h-11 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] pl-9 pr-9 text-[14.5px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--border-strong)] focus:outline-none transition-colors"
             />
             {searchQuery ? (
               <button
@@ -1209,7 +1209,7 @@ export default function App() {
                 type="button"
                 onClick={() => setSelectedTag(null)}
                 className={[
-                  'shrink-0 rounded-full px-3 py-1.5 text-[12px] font-medium transition-colors cursor-pointer',
+                  'shrink-0 rounded-full px-3.5 py-1.5 text-[13px] font-medium transition-colors cursor-pointer',
                   selectedTag === null
                     ? 'bg-[var(--pill-active-bg)] text-[var(--pill-active-ink)]'
                     : 'bg-[var(--surface-subtle)] text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)]',
@@ -1225,7 +1225,7 @@ export default function App() {
                     type="button"
                     onClick={() => setSelectedTag(active ? null : tag)}
                     className={[
-                      'shrink-0 rounded-full px-3 py-1.5 text-[12px] font-medium transition-colors cursor-pointer',
+                      'shrink-0 rounded-full px-3.5 py-1.5 text-[13px] font-medium transition-colors cursor-pointer',
                       active
                         ? 'bg-[var(--pill-active-bg)] text-[var(--pill-active-ink)]'
                         : 'bg-[var(--surface-subtle)] text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)]',
@@ -1324,11 +1324,11 @@ export default function App() {
                   {isProcessing ? (
                     <div className="space-y-2.5">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="inline-flex items-center gap-2 text-[13px] font-medium text-[var(--ink)]">
+                        <span className="inline-flex items-center gap-2 text-[14px] font-medium text-[var(--ink)]">
                           <span className="h-2 w-2 rounded-full bg-[var(--vermilion)] animate-pulse" />
                           Listening &amp; organizing…
                         </span>
-                        <span className="font-mono text-[11px] tabular-nums text-[var(--ink-muted)]">
+                        <span className="font-mono text-[12px] tabular-nums text-[var(--ink-muted)]">
                           {formatDuration(rec.durationSeconds)}
                         </span>
                       </div>
@@ -1340,40 +1340,40 @@ export default function App() {
                   ) : (
                     <>
                       <div className="flex items-start justify-between gap-2.5">
-                        <h2 className="text-[14.5px] font-medium leading-[1.35] tracking-[-0.01em] text-[var(--ink)]">
+                        <h2 className="text-[15.5px] font-medium leading-[1.35] tracking-[-0.01em] text-[var(--ink)]">
                           {rec.title}
                         </h2>
-                        <span className="shrink-0 pt-0.5 text-[11px] tabular-nums text-[var(--ink-muted)]">
+                        <span className="shrink-0 pt-0.5 text-[12px] tabular-nums text-[var(--ink-muted)]">
                           {formatRelativeTime(rec.created)}
                         </span>
                       </div>
 
                       {isFailed ? (
-                        <p className="mt-1 inline-flex items-center gap-1.5 text-[12.5px] text-[var(--vermilion)]">
+                        <p className="mt-1.5 inline-flex items-center gap-1.5 text-[13.5px] text-[var(--vermilion)]">
                           <AlertCircle className="h-3.5 w-3.5 shrink-0" />
                           Audio saved · tap to retry transcription
                         </p>
                       ) : (
                         rec.summary && (
-                          <p className="mt-1 text-[13px] leading-[1.45] text-[var(--ink-secondary)] line-clamp-2">
+                          <p className="mt-1.5 text-[14px] leading-[1.48] text-[var(--ink-secondary)] line-clamp-2">
                             {rec.summary}
                           </p>
                         )
                       )}
 
-                      <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-                        <span className="font-mono text-[11px] tabular-nums text-[var(--ink-muted)]">
+                      <div className="mt-2.5 flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                        <span className="font-mono text-[12px] tabular-nums text-[var(--ink-muted)]">
                           {formatDuration(rec.durationSeconds)}
                         </span>
 
                         {!rec.isEnglish && !isFailed && (
-                          <span className="rounded-md bg-[var(--surface-subtle)] px-1.5 py-0.5 font-mono text-[10px] font-medium tracking-wide text-[var(--ink-secondary)]">
+                          <span className="rounded-md bg-[var(--surface-subtle)] px-2 py-0.5 font-mono text-[11px] font-medium tracking-wide text-[var(--ink-secondary)]">
                             {rec.language.toUpperCase()} → EN
                           </span>
                         )}
 
                         {rec.tags.slice(0, 4).map((tag) => (
-                          <span key={tag} className="text-[11px] text-[var(--ink-muted)]">
+                          <span key={tag} className="text-[12px] text-[var(--ink-muted)]">
                             #{tag}
                           </span>
                         ))}
@@ -1565,14 +1565,14 @@ export default function App() {
           ) : (
             <div className="flex items-center justify-between gap-2.5">
               <div className="min-w-0">
-                <p className="text-[12.5px] font-medium text-[var(--ink)]">
+                <p className="text-[13.5px] font-medium text-[var(--ink)]">
                   {uploading
                     ? 'Saving audio…'
                     : recorder.status === 'requesting'
                       ? 'Requesting mic…'
                       : 'Ready to record'}
                 </p>
-                <p className="font-mono text-[10.5px] tracking-wide text-[var(--ink-muted)] truncate">
+                <p className="font-mono text-[11.5px] tracking-wide text-[var(--ink-muted)] truncate">
                   {formatCodecLabel(recorder.supportedMimeType)} · Obsidian .md
                 </p>
               </div>
@@ -1599,7 +1599,7 @@ export default function App() {
                   <span className="flex h-5 w-5 items-center justify-center rounded-full border border-white/45">
                     <span className="h-2.5 w-2.5 rounded-full bg-white" />
                   </span>
-                  <span className="text-[14px] font-medium tracking-[-0.01em]">Record</span>
+                  <span className="text-[15px] font-medium tracking-[-0.01em]">Record</span>
                 </button>
               </div>
             </div>
@@ -1629,12 +1629,12 @@ export default function App() {
                   Notes
                 </button>
 
-                <span className="hidden sm:inline text-[12.5px] text-[var(--ink-muted)] truncate">
+                <span className="hidden sm:inline text-[13.5px] text-[var(--ink-muted)] truncate">
                   {formatFullTimestamp(selectedRecording.created)}
                 </span>
 
                 {!selectedRecording.isEnglish && selectedRecording.status === 'ready' && (
-                  <span className="hidden md:inline-flex items-center rounded-md bg-[var(--surface-subtle)] px-2 py-0.5 text-[11px] font-medium text-[var(--ink-secondary)] shrink-0">
+                  <span className="hidden md:inline-flex items-center rounded-md bg-[var(--surface-subtle)] px-2 py-0.5 text-[12px] font-medium text-[var(--ink-secondary)] shrink-0">
                     {selectedRecording.languageName} → English
                   </span>
                 )}
@@ -1666,7 +1666,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => void handleCopyMarkdown()}
-                      className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 text-[12.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] transition-colors cursor-pointer"
+                      className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 text-[13.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] transition-colors cursor-pointer"
                     >
                       {copiedId === selectedRecording.id ? (
                         <>
@@ -1685,7 +1685,7 @@ export default function App() {
                       type="button"
                       onClick={handleDownloadMarkdown}
                       title={`Download ${selectedFilename}`}
-                      className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 text-[12.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] transition-colors cursor-pointer"
+                      className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 text-[13.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] transition-colors cursor-pointer"
                     >
                       <Download className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
                       <span className="hidden sm:inline">.md</span>
@@ -1760,7 +1760,7 @@ export default function App() {
                         if (e.key === 'Escape') setEditingTitle(false);
                       }}
                       aria-label="Edit note title"
-                      className="w-full rounded-xl border border-[var(--border-strong)] bg-[var(--canvas)] px-3 py-1.5 -mx-3 text-[23px] sm:text-[26px] font-semibold leading-[1.22] tracking-[-0.025em] text-[var(--ink)] focus:outline-none"
+                      className="w-full rounded-xl border border-[var(--border-strong)] bg-[var(--canvas)] px-3 py-1.5 -mx-3 text-[26px] sm:text-[30px] font-semibold leading-[1.2] tracking-[-0.025em] text-[var(--ink)] focus:outline-none"
                     />
                   ) : (
                     <button
@@ -1769,31 +1769,31 @@ export default function App() {
                       disabled={selectedRecording.status === 'processing'}
                       className="group inline-flex items-baseline gap-2.5 text-left rounded-lg -mx-1.5 px-1.5 py-0.5 hover:bg-[var(--surface-subtle)]/70 transition-colors disabled:hover:bg-transparent cursor-pointer"
                     >
-                      <h2 className="text-[23px] sm:text-[26px] font-semibold leading-[1.22] tracking-[-0.025em] text-[var(--ink)]">
+                      <h2 className="text-[26px] sm:text-[30px] font-semibold leading-[1.2] tracking-[-0.025em] text-[var(--ink)]">
                         {selectedRecording.status === 'processing'
                           ? 'Listening & organizing…'
                           : selectedRecording.title}
                       </h2>
                       {selectedRecording.status !== 'processing' && (
-                        <Pencil className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)] opacity-0 group-hover:opacity-100 transition-opacity" />
+                        <Pencil className="h-4 w-4 shrink-0 text-[var(--ink-muted)] opacity-0 group-hover:opacity-100 transition-opacity" />
                       )}
                     </button>
                   )}
 
                   {/* Editorial 1-line Summary */}
                   {selectedRecording.status === 'ready' && selectedRecording.summary && (
-                    <p className="mt-3 border-l-2 border-[var(--border-strong)] pl-3.5 text-[14.5px] leading-[1.6] text-[var(--ink-secondary)]">
+                    <p className="mt-3.5 border-l-2 border-[var(--border-strong)] pl-4 text-[16px] leading-[1.62] text-[var(--ink-secondary)]">
                       {selectedRecording.summary}
                     </p>
                   )}
 
                   {/* Inline Editable Tags */}
                   {selectedRecording.status !== 'processing' && (
-                    <div className="mt-4 flex flex-wrap items-center gap-1.5">
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
                       {selectedRecording.tags.map((tag) => (
                         <span
                           key={tag}
-                          className="inline-flex items-center gap-1 rounded-full bg-[var(--surface-subtle)] pl-2.5 pr-1.5 py-1 text-[12px] font-medium text-[var(--ink-secondary)]"
+                          className="inline-flex items-center gap-1 rounded-full bg-[var(--surface-subtle)] pl-3 pr-2 py-1 text-[13px] font-medium text-[var(--ink-secondary)]"
                         >
                           <span>#{tag}</span>
                           <button
@@ -1802,7 +1802,7 @@ export default function App() {
                             aria-label={`Remove tag ${tag}`}
                             className="flex h-4 w-4 items-center justify-center rounded-full text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] cursor-pointer"
                           >
-                            <X className="h-2.5 w-2.5" />
+                            <X className="h-3 w-3" />
                           </button>
                         </span>
                       ))}
@@ -1826,15 +1826,15 @@ export default function App() {
                           }}
                           placeholder="new-tag"
                           aria-label="New tag name"
-                          className="h-7 w-28 rounded-full border border-[var(--border-strong)] bg-[var(--canvas)] px-2.5 text-[12px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:outline-none"
+                          className="h-7 w-28 rounded-full border border-[var(--border-strong)] bg-[var(--canvas)] px-2.5 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:outline-none"
                         />
                       ) : (
                         <button
                           type="button"
                           onClick={() => setAddingTag(true)}
-                          className="inline-flex h-7 items-center gap-1 rounded-full border border-dashed border-[var(--border-strong)] px-2.5 text-[11.5px] font-medium text-[var(--ink-muted)] hover:border-[var(--ink-muted)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+                          className="inline-flex h-7 items-center gap-1 rounded-full border border-dashed border-[var(--border-strong)] px-3 text-[12.5px] font-medium text-[var(--ink-muted)] hover:border-[var(--ink-muted)] hover:text-[var(--ink)] transition-colors cursor-pointer"
                         >
-                          <Plus className="h-3 w-3" />
+                          <Plus className="h-3.5 w-3.5" />
                           tag
                         </button>
                       )}
@@ -1882,7 +1882,7 @@ export default function App() {
                       aria-selected={detailTab === 'english'}
                       onClick={() => setDetailTab('english')}
                       className={[
-                        'rounded-lg px-3.5 py-1.5 text-[12.5px] font-medium transition-all cursor-pointer',
+                        'rounded-lg px-3.5 py-1.5 text-[13.5px] font-medium transition-all cursor-pointer',
                         detailTab === 'english'
                           ? 'bg-[var(--surface)] text-[var(--ink)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]'
                           : 'text-[var(--ink-muted)] hover:text-[var(--ink)]',
@@ -1898,7 +1898,7 @@ export default function App() {
                         aria-selected={detailTab === 'original'}
                         onClick={() => setDetailTab('original')}
                         className={[
-                          'rounded-lg px-3.5 py-1.5 text-[12.5px] font-medium transition-all cursor-pointer',
+                          'rounded-lg px-3.5 py-1.5 text-[13.5px] font-medium transition-all cursor-pointer',
                           detailTab === 'original'
                             ? 'bg-[var(--surface)] text-[var(--ink)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]'
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]',
@@ -1914,7 +1914,7 @@ export default function App() {
                       aria-selected={detailTab === 'markdown'}
                       onClick={() => setDetailTab('markdown')}
                       className={[
-                        'rounded-lg px-3.5 py-1.5 text-[12.5px] font-medium transition-all cursor-pointer',
+                        'rounded-lg px-3.5 py-1.5 text-[13.5px] font-medium transition-all cursor-pointer',
                         detailTab === 'markdown'
                           ? 'bg-[var(--surface)] text-[var(--ink)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]'
                           : 'text-[var(--ink-muted)] hover:text-[var(--ink)]',
@@ -1924,7 +1924,7 @@ export default function App() {
                     </button>
                   </div>
 
-                  <span className="font-mono text-[11px] text-[var(--ink-muted)] truncate">
+                  <span className="font-mono text-[12px] text-[var(--ink-muted)] truncate">
                     {selectedFilename}
                   </span>
                 </div>
@@ -1932,11 +1932,11 @@ export default function App() {
                 {/* Body Content */}
                 {selectedRecording.status === 'processing' ? (
                   <div className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] p-5 space-y-3.5">
-                    <div className="flex items-center gap-2.5 text-[13.5px] font-medium text-[var(--ink)]">
+                    <div className="flex items-center gap-2.5 text-[14.5px] font-medium text-[var(--ink)]">
                       <span className="h-2 w-2 rounded-full bg-[var(--vermilion)] animate-pulse" />
                       Listening &amp; organizing…
                     </div>
-                    <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                    <p className="text-[14px] leading-relaxed text-[var(--ink-muted)]">
                       Your audio is safely saved on disk. Detecting language, transcribing,
                       summarizing, and writing the Obsidian Markdown note.
                     </p>
@@ -1955,10 +1955,10 @@ export default function App() {
                   />
                 ) : detailTab === 'original' && !selectedRecording.isEnglish ? (
                   <section lang={selectedRecording.language} className="space-y-4 pt-1">
-                    <p className="font-mono text-[11px] uppercase tracking-wider text-[var(--ink-muted)]">
+                    <p className="font-mono text-[12px] uppercase tracking-wider text-[var(--ink-muted)]">
                       Original · {selectedRecording.languageName}
                     </p>
-                    <div className="space-y-4 text-[15.5px] leading-[1.8] text-[var(--ink)]">
+                    <div className="space-y-4 text-[17px] leading-[1.82] text-[var(--ink)]">
                       {(selectedRecording.originalTranscript ?? '')
                         .split(/\n{2,}/)
                         .filter(Boolean)
@@ -1970,7 +1970,7 @@ export default function App() {
                 ) : (
                   <section className="space-y-4 pt-1">
                     {selectedRecording.englishTranscript ? (
-                      <div className="space-y-4 text-[15.5px] leading-[1.78] text-[var(--ink)]">
+                      <div className="space-y-4 text-[17px] leading-[1.78] text-[var(--ink)]">
                         {selectedRecording.englishTranscript
                           .split(/\n{2,}/)
                           .filter(Boolean)
@@ -1979,7 +1979,7 @@ export default function App() {
                           ))}
                       </div>
                     ) : (
-                      <p className="text-[14px] text-[var(--ink-muted)]">
+                      <p className="text-[15px] text-[var(--ink-muted)]">
                         No transcript yet.
                       </p>
                     )}
