@@ -7,7 +7,7 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
-import { analyzeAudioFile, getGeminiModel, hasGeminiApiKey } from './gemini';
+import { analyzeAudioFile, formatGeminiError, getGeminiModel, hasGeminiApiKey } from './gemini';
 import {
   generateRecordingId,
   isValidRecordingId,
@@ -202,9 +202,7 @@ async function runReservedJob(id: string, mimeTypeHint?: string): Promise<void> 
     });
   } catch (err) {
     console.error(`Failed processing recording ${id}:`, err);
-    const message =
-      err instanceof Error ? err.message : 'Transcription failed. Tap Reprocess to try again.';
-    await noteStore.markFailed(id, message.slice(0, 260));
+    await noteStore.markFailed(id, formatGeminiError(err));
   } finally {
     activeJobs.delete(id);
   }

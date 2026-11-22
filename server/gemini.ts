@@ -4,8 +4,10 @@ import { normalizeTag } from '../src/markdown';
 
 const INLINE_LIMIT_BYTES = 12 * 1024 * 1024; // 12 MB raw (safe under 20 MB request cap after base64)
 const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
+const DEFAULT_FALLBACK_MODEL = 'gemini-2.5-flash';
 const GENERATE_TIMEOUT_MS = 90_000;
 const FILES_POLL_TIMEOUT_MS = 60_000;
+const RETRY_DELAYS_MS = [1500, 3500];
 
 export interface AudioAnalysisResult {
   detectedLanguage: string;
@@ -20,6 +22,88 @@ export interface AudioAnalysisResult {
 
 export function getGeminiModel(): string {
   return process.env.GEMINI_MODEL?.trim() || DEFAULT_MODEL;
+}
+
+export function getGeminiFallbackModel(primaryModel: string): string | null {
+  const configured = process.env.GEMINI_FALLBACK_MODEL?.trim();
+  if (configured !== undefined) {
+    if (!configured || configured.toLowerCase() === 'none' || configured === primaryModel) {
+      return null;
+    }
+    return configured;
+  }
+  return primaryModel === DEFAULT_FALLBACK_MODEL ? null : DEFAULT_FALLBACK_MODEL;
+}
+
+interface ParsedApiError {
+  code?: number;
+  status?: string;
+  message: string;
+}
+
+function parseGeminiError(err: unknown): ParsedApiError {
+  const raw = err instanceof Error ? err.message : String(err ?? 'Unknown error');
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        error?: { code?: number; status?: string; message?: string };
+        code?: number;
+        status?: string;
+        message?: string;
+      };
+      const inner = parsed.error ?? parsed;
+      if (inner && typeof inner === 'object') {
+        return {
+          code: typeof inner.code === 'number' ? inner.code : undefined,
+          status: typeof inner.status === 'string' ? inner.status : undefined,
+          message:
+            typeof inner.message === 'string' && inner.message.trim()
+              ? inner.message.trim()
+              : trimmed,
+        };
+      }
+    } catch {
+      // fall through
+    }
+  }
+  return { message: trimmed };
+}
+
+function isTransientError(err: unknown): boolean {
+  const parsed = parseGeminiError(err);
+  if (parsed.code === 429 || parsed.code === 500 || parsed.code === 503 || parsed.code === 504) {
+    return true;
+  }
+  if (
+    parsed.status === 'UNAVAILABLE' ||
+    parsed.status === 'RESOURCE_EXHAUSTED' ||
+    parsed.status === 'INTERNAL' ||
+    parsed.status === 'DEADLINE_EXCEEDED'
+  ) {
+    return true;
+  }
+  const lower = parsed.message.toLowerCase();
+  return (
+    lower.includes('high demand') ||
+    lower.includes('temporarily unavailable') ||
+    lower.includes('overloaded') ||
+    lower.includes('rate limit')
+  );
+}
+
+export function formatGeminiError(err: unknown): string {
+  const parsed = parseGeminiError(err);
+  if (parsed.code === 503 || parsed.status === 'UNAVAILABLE') {
+    return 'Gemini is temporarily experiencing high demand. Your audio is safe — tap Retry processing in a moment.';
+  }
+  if (parsed.code === 429 || parsed.status === 'RESOURCE_EXHAUSTED') {
+    return 'Gemini rate limit reached. Wait a moment and tap Retry processing.';
+  }
+  if (parsed.code === 401 || parsed.code === 403) {
+    return 'Gemini rejected the API key. Check GEMINI_API_KEY in .env and tap Retry processing.';
+  }
+  return parsed.message.slice(0, 260) || 'Transcription failed. Tap Retry processing to try again.';
 }
 
 export function hasGeminiApiKey(): boolean {
@@ -242,29 +326,57 @@ export async function analyzeAudioFile(params: {
       };
     }
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: [
-        {
-          role: 'user',
-          parts: [mediaPart, { text: prompt }],
+    const runGenerate = async (targetModel: string) => {
+      const response = await ai.models.generateContent({
+        model: targetModel,
+        contents: [
+          {
+            role: 'user',
+            parts: [mediaPart, { text: prompt }],
+          },
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: RESPONSE_SCHEMA,
+          temperature: 0.2,
+          abortSignal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
         },
-      ],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: RESPONSE_SCHEMA,
-        temperature: 0.2,
-        abortSignal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
-      },
-    });
+      });
 
-    const text = response.text?.trim();
-    if (!text) {
-      throw new Error('Gemini returned an empty response.');
+      const text = response.text?.trim();
+      if (!text) {
+        throw new Error('Gemini returned an empty response.');
+      }
+
+      const parsed = JSON.parse(text) as Partial<AudioAnalysisResult>;
+      return sanitizeResult(parsed);
+    };
+
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+      try {
+        return await runGenerate(model);
+      } catch (err) {
+        lastErr = err;
+        if (!isTransientError(err)) {
+          throw err;
+        }
+        const delay = RETRY_DELAYS_MS[attempt];
+        if (delay !== undefined) {
+          await new Promise((r) => setTimeout(r, delay));
+        }
+      }
     }
 
-    const parsed = JSON.parse(text) as Partial<AudioAnalysisResult>;
-    return sanitizeResult(parsed);
+    const fallbackModel = getGeminiFallbackModel(model);
+    if (fallbackModel && isTransientError(lastErr)) {
+      console.warn(
+        `Gemini primary model (${model}) transiently unavailable; falling back to ${fallbackModel}.`,
+      );
+      return await runGenerate(fallbackModel);
+    }
+
+    throw lastErr;
   } finally {
     if (uploadedFileName) {
       await ai.files.delete({ name: uploadedFileName }).catch(() => {});
