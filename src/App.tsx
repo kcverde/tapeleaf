@@ -7,6 +7,7 @@ import {
   Download,
   FileAudio,
   FileText,
+  Lock,
   Moon,
   Pause,
   Pencil,
@@ -38,6 +39,7 @@ type DetailTab = 'english' | 'original' | 'markdown';
 type ThemeMode = 'light' | 'dark';
 
 interface PendingUpload {
+  clientUploadId: string;
   captured: CapturedAudio;
   error: string;
 }
@@ -49,6 +51,13 @@ function getInitialTheme(): ThemeMode {
   const stored = window.localStorage.getItem('tapeleaf-theme');
   if (stored === 'light' || stored === 'dark') return stored;
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function createClientUploadId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID().replace(/-/g, '');
+  }
+  return `up_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function triggerDownload(blob: Blob, filename: string) {
@@ -110,11 +119,20 @@ async function readAudioDuration(file: Blob): Promise<number> {
   });
 }
 
+function getSeekableEnd(el: HTMLAudioElement): number {
+  if (el.seekable && el.seekable.length > 0) {
+    const end = el.seekable.end(el.seekable.length - 1);
+    if (Number.isFinite(end) && end > 0) return end;
+  }
+  return 0;
+}
+
 function AudioPlayer({ recording }: { recording: Recording }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [mediaDuration, setMediaDuration] = useState(0);
+  const [seekableEnd, setSeekableEnd] = useState(0);
   const [rateIndex, setRateIndex] = useState(0);
 
   const playbackRate = PLAYBACK_RATES[rateIndex];
@@ -124,6 +142,7 @@ function AudioPlayer({ recording }: { recording: Recording }) {
     setIsPlaying(false);
     setCurrentTime(0);
     setMediaDuration(0);
+    setSeekableEnd(0);
     const el = audioRef.current;
     if (el) {
       el.pause();
@@ -137,6 +156,14 @@ function AudioPlayer({ recording }: { recording: Recording }) {
       audioRef.current.playbackRate = playbackRate;
     }
   }, [playbackRate]);
+
+  const syncMetrics = (el: HTMLAudioElement) => {
+    if (Number.isFinite(el.duration) && el.duration > 0) {
+      setMediaDuration(el.duration);
+    }
+    const end = getSeekableEnd(el);
+    if (end > 0) setSeekableEnd(end);
+  };
 
   const togglePlay = async () => {
     const el = audioRef.current;
@@ -152,25 +179,38 @@ function AudioPlayer({ recording }: { recording: Recording }) {
     }
   };
 
+  const maxSeekable =
+    seekableEnd > 0
+      ? seekableEnd
+      : mediaDuration > 0
+        ? mediaDuration
+        : recording.durationSeconds;
+
+  const canSeek = seekableEnd > 0 || mediaDuration > 0;
+
   const seekTo = (nextSeconds: number) => {
     const el = audioRef.current;
-    if (!el) return;
-    const max = mediaDuration || recording.durationSeconds || 1;
-    const clamped = Math.max(0, Math.min(max, nextSeconds));
-    el.currentTime = clamped;
-    setCurrentTime(clamped);
+    if (!el || !canSeek) return;
+    const liveEnd = getSeekableEnd(el);
+    const upper = liveEnd > 0 ? liveEnd : maxSeekable;
+    if (upper <= 0) return;
+    const clamped = Math.max(0, Math.min(upper, nextSeconds));
+    try {
+      el.currentTime = clamped;
+      setCurrentTime(clamped);
+    } catch {
+      // ignore if media element is not seekable yet
+    }
   };
 
   const cycleRate = () => {
     setRateIndex((prev) => (prev + 1) % PLAYBACK_RATES.length);
   };
 
-  const effectiveDuration =
-    mediaDuration > 0 && Number.isFinite(mediaDuration)
-      ? mediaDuration
-      : recording.durationSeconds;
+  const displayDuration = Math.max(mediaDuration, seekableEnd, recording.durationSeconds);
+  const scrubberMax = Math.max(maxSeekable, 0.1);
   const progressPct =
-    effectiveDuration > 0 ? Math.min(100, (currentTime / effectiveDuration) * 100) : 0;
+    displayDuration > 0 ? Math.min(100, (currentTime / displayDuration) * 100) : 0;
 
   return (
     <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-subtle)]/75 px-3.5 py-3 sm:px-4 sm:py-3.5">
@@ -178,11 +218,13 @@ function AudioPlayer({ recording }: { recording: Recording }) {
         ref={audioRef}
         src={src}
         preload="metadata"
-        onLoadedMetadata={(e) => {
-          const d = e.currentTarget.duration;
-          if (Number.isFinite(d) && d > 0) setMediaDuration(d);
+        onLoadedMetadata={(e) => syncMetrics(e.currentTarget)}
+        onDurationChange={(e) => syncMetrics(e.currentTarget)}
+        onProgress={(e) => syncMetrics(e.currentTarget)}
+        onTimeUpdate={(e) => {
+          setCurrentTime(e.currentTarget.currentTime);
+          syncMetrics(e.currentTarget);
         }}
-        onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
         onEnded={() => {
@@ -209,18 +251,20 @@ function AudioPlayer({ recording }: { recording: Recording }) {
           <button
             type="button"
             onClick={() => seekTo(currentTime - 10)}
+            disabled={!canSeek}
             aria-label="Rewind 10 seconds"
             title="Back 10s"
-            className="flex h-9 w-9 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+            className="flex h-9 w-9 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] transition-colors disabled:opacity-40 cursor-pointer"
           >
             <RotateCcw className="h-3.5 w-3.5" />
           </button>
           <button
             type="button"
             onClick={() => seekTo(currentTime + 10)}
+            disabled={!canSeek}
             aria-label="Forward 10 seconds"
             title="Forward 10s"
-            className="flex h-9 w-9 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+            className="flex h-9 w-9 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] transition-colors disabled:opacity-40 cursor-pointer"
           >
             <RotateCw className="h-3.5 w-3.5" />
           </button>
@@ -230,12 +274,13 @@ function AudioPlayer({ recording }: { recording: Recording }) {
           <input
             type="range"
             min={0}
-            max={effectiveDuration || 1}
+            max={scrubberMax}
             step={0.05}
-            value={Math.min(currentTime, effectiveDuration || 1)}
+            disabled={!canSeek}
+            value={Math.min(currentTime, scrubberMax)}
             onChange={(e) => seekTo(Number(e.target.value))}
             aria-label="Audio progress"
-            className="tapeleaf-scrubber w-full block"
+            className="tapeleaf-scrubber w-full block disabled:opacity-60"
             style={{
               background: `linear-gradient(to right, var(--ink) 0%, var(--ink) ${progressPct}%, var(--border-strong) ${progressPct}%, var(--border-strong) 100%)`,
               height: '4px',
@@ -244,7 +289,7 @@ function AudioPlayer({ recording }: { recording: Recording }) {
           />
           <div className="mt-1.5 flex items-center justify-between text-[11px] font-mono tabular-nums text-[var(--ink-muted)]">
             <span>{formatDuration(currentTime)}</span>
-            <span>{formatDuration(effectiveDuration)}</span>
+            <span>{formatDuration(displayDuration)}</span>
           </div>
         </div>
 
@@ -360,6 +405,13 @@ function MarkdownPreview({
               </div>
             );
           }
+          if (line.startsWith('<!--')) {
+            return (
+              <div key={index} className="text-[var(--ink-muted)]/70">
+                {line}
+              </div>
+            );
+          }
           return (
             <div key={index} className="text-[var(--ink)]">
               {line || '\u00A0'}
@@ -373,10 +425,18 @@ function MarkdownPreview({
 
 export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
+  const [authState, setAuthState] = useState<'checking' | 'locked' | 'unlocked'>('checking');
+  const [passcodeEnabled, setPasscodeEnabled] = useState(false);
+  const [passcodeInput, setPasscodeInput] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [unlocking, setUnlocking] = useState(false);
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [loadingLibrary, setLoadingLibrary] = useState(true);
   const [libraryError, setLibraryError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string>('');
+  const [serverMarkdownCache, setServerMarkdownCache] = useState<
+    Record<string, { filename: string; markdown: string }>
+  >({});
   const [mobileView, setMobileView] = useState<'list' | 'detail'>('list');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
@@ -387,9 +447,9 @@ export default function App() {
   const [addingTag, setAddingTag] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
+  const [uploadingCount, setUploadingCount] = useState(0);
   const [savedToast, setSavedToast] = useState(false);
-  const [pendingUpload, setPendingUpload] = useState<PendingUpload | null>(null);
+  const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
@@ -397,7 +457,93 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const savedTimerRef = useRef<number | null>(null);
 
-  const recorder = useRecorder();
+  const handleUnauthorized = useCallback(() => {
+    setPasscodeEnabled(true);
+    setAuthState('locked');
+    setAuthError('Your session expired. Unlock to continue.');
+  }, []);
+
+  const showSavedConfirmation = useCallback(() => {
+    setSavedToast(true);
+    if (savedTimerRef.current) window.clearTimeout(savedTimerRef.current);
+    savedTimerRef.current = window.setTimeout(() => setSavedToast(false), 2600);
+  }, []);
+
+  const uploadCapturedAudio = useCallback(
+    async (captured: CapturedAudio, existingUploadId?: string) => {
+      const clientUploadId = existingUploadId || createClientUploadId();
+      setUploadingCount((c) => c + 1);
+
+      try {
+        const form = new FormData();
+        const filename = `recording.${captured.extension}`;
+        form.append('audio', captured.blob, filename);
+        form.append('durationSeconds', String(captured.durationSeconds));
+        form.append('mimeType', captured.mimeType);
+        form.append('clientUploadId', clientUploadId);
+
+        const res = await fetch('/api/recordings', {
+          method: 'POST',
+          body: form,
+        });
+
+        if (res.status === 401) {
+          setPendingUploads((prev) => {
+            const rest = prev.filter((item) => item.clientUploadId !== clientUploadId);
+            return [
+              {
+                clientUploadId,
+                captured,
+                error: 'Session locked — unlock to retry uploading this clip.',
+              },
+              ...rest,
+            ];
+          });
+          handleUnauthorized();
+          return;
+        }
+
+        if (!res.ok) {
+          const payload = (await res.json().catch(() => ({}))) as { error?: string };
+          throw new Error(payload.error || `Upload failed (${res.status})`);
+        }
+
+        const data = (await res.json()) as { recording: Recording };
+        // Remove only this confirmed upload; preserve any other pending clips
+        setPendingUploads((prev) =>
+          prev.filter((item) => item.clientUploadId !== clientUploadId),
+        );
+        setRecordings((prev) => [
+          data.recording,
+          ...prev.filter((r) => r.id !== data.recording.id),
+        ]);
+        setSelectedId(data.recording.id);
+        setSelectedTag(null);
+        setSearchQuery('');
+        setDetailTab('english');
+        setMobileView('detail');
+        showSavedConfirmation();
+      } catch (err) {
+        const message =
+          err instanceof Error
+            ? err.message
+            : 'Could not upload audio. Your recording is still safe in this tab.';
+        setPendingUploads((prev) => {
+          const rest = prev.filter((item) => item.clientUploadId !== clientUploadId);
+          return [{ clientUploadId, captured, error: message }, ...rest];
+        });
+      } finally {
+        setUploadingCount((c) => Math.max(0, c - 1));
+      }
+    },
+    [handleUnauthorized, showSavedConfirmation],
+  );
+
+  const recorder = useRecorder({
+    onInterruptedCapture: (captured) => {
+      void uploadCapturedAudio(captured);
+    },
+  });
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -409,36 +555,112 @@ export default function App() {
     };
   }, []);
 
-  const fetchRecordings = useCallback(async (silent = false) => {
-    if (!silent) setLibraryError(null);
-    try {
-      const res = await fetch('/api/recordings', { cache: 'no-store' });
-      if (!res.ok) {
-        throw new Error(`Server returned ${res.status}`);
+  const fetchRecordings = useCallback(
+    async (silent = false) => {
+      if (!silent) setLibraryError(null);
+      try {
+        const res = await fetch('/api/recordings', { cache: 'no-store' });
+        if (res.status === 401) {
+          handleUnauthorized();
+          setRecordings([]);
+          return;
+        }
+        if (!res.ok) {
+          throw new Error(`Server returned ${res.status}`);
+        }
+        const data = (await res.json()) as { recordings: Recording[] };
+        setRecordings(data.recordings);
+        setSelectedId((prev) => {
+          if (prev && data.recordings.some((r) => r.id === prev)) return prev;
+          return data.recordings[0]?.id ?? '';
+        });
+        setLibraryError(null);
+      } catch {
+        if (!silent) {
+          setLibraryError('Could not reach Tapeleaf server.');
+        }
+      } finally {
+        setLoadingLibrary(false);
       }
-      const data = (await res.json()) as { recordings: Recording[] };
-      setRecordings(data.recordings);
-      setSelectedId((prev) => {
-        if (prev && data.recordings.some((r) => r.id === prev)) return prev;
-        return data.recordings[0]?.id ?? '';
-      });
-      setLibraryError(null);
-    } catch {
-      if (!silent) {
-        setLibraryError('Could not reach Tapeleaf server.');
-      }
-    } finally {
-      setLoadingLibrary(false);
-    }
-  }, []);
+    },
+    [handleUnauthorized],
+  );
 
-  // Initial load
+  // Check auth status on boot, then load library
   useEffect(() => {
-    void fetchRecordings(false);
+    let active = true;
+    const init = async () => {
+      try {
+        const res = await fetch('/api/auth/status', { cache: 'no-store' });
+        if (!res.ok) throw new Error('Auth check failed');
+        const data = (await res.json()) as {
+          passcodeEnabled: boolean;
+          authenticated: boolean;
+        };
+        if (!active) return;
+        setPasscodeEnabled(data.passcodeEnabled);
+        if (data.passcodeEnabled && !data.authenticated) {
+          setAuthState('locked');
+          setLoadingLibrary(false);
+          return;
+        }
+        setAuthState('unlocked');
+        await fetchRecordings(false);
+      } catch {
+        if (!active) return;
+        setAuthState('unlocked');
+        await fetchRecordings(false);
+      }
+    };
+    void init();
+    return () => {
+      active = false;
+    };
   }, [fetchRecordings]);
+
+  const handleUnlock = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!passcodeInput.trim() || unlocking) return;
+    setUnlocking(true);
+    setAuthError(null);
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passcode: passcodeInput }),
+      });
+      if (!res.ok) {
+        const payload = (await res.json().catch(() => ({}))) as { error?: string };
+        setAuthError(payload.error || 'Incorrect passcode.');
+        return;
+      }
+      setPasscodeInput('');
+      setAuthState('unlocked');
+      setLoadingLibrary(true);
+      await fetchRecordings(false);
+    } catch {
+      setAuthError('Could not reach Tapeleaf server.');
+    } finally {
+      setUnlocking(false);
+    }
+  };
+
+  const handleLock = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // ignore
+    }
+    setRecordings([]);
+    setSelectedId('');
+    setServerMarkdownCache({});
+    setAuthError(null);
+    setAuthState('locked');
+  };
 
   // Refresh on window focus / visibility for phone ↔ desktop sync
   useEffect(() => {
+    if (authState !== 'unlocked') return;
     const onFocus = () => void fetchRecordings(true);
     const onVisibility = () => {
       if (document.visibilityState === 'visible') {
@@ -451,12 +673,12 @@ export default function App() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [fetchRecordings]);
+  }, [authState, fetchRecordings]);
 
   // Poll gently while any clip is processing
   const hasProcessing = useMemo(
-    () => recordings.some((r) => r.status === 'processing'),
-    [recordings],
+    () => authState === 'unlocked' && recordings.some((r) => r.status === 'processing'),
+    [authState, recordings],
   );
 
   useEffect(() => {
@@ -532,6 +754,41 @@ export default function App() {
     );
   }, [recordings, selectedId, filteredRecordings]);
 
+  // Keep Preview / Copy MD in exact sync with the stored Markdown on disk
+  const selectedFingerprint = selectedRecording
+    ? `${selectedRecording.id}:${selectedRecording.status}:${selectedRecording.title}:${selectedRecording.tags.join(',')}:${selectedRecording.filename ?? ''}`
+    : '';
+
+  useEffect(() => {
+    if (authState !== 'unlocked' || !selectedRecording) return;
+    let active = true;
+    const id = selectedRecording.id;
+    const loadStoredMarkdown = async () => {
+      try {
+        const res = await fetch(`/api/recordings/${encodeURIComponent(id)}`, {
+          cache: 'no-store',
+        });
+        if (res.status === 401) {
+          handleUnauthorized();
+          return;
+        }
+        if (!res.ok) return;
+        const data = (await res.json()) as { filename: string; markdown: string };
+        if (!active) return;
+        setServerMarkdownCache((prev) => ({
+          ...prev,
+          [id]: { filename: data.filename, markdown: data.markdown },
+        }));
+      } catch {
+        // fallback to client serializer
+      }
+    };
+    void loadStoredMarkdown();
+    return () => {
+      active = false;
+    };
+  }, [authState, selectedFingerprint, handleUnauthorized]);
+
   useEffect(() => {
     if (selectedRecording?.isEnglish && detailTab === 'original') {
       setDetailTab('english');
@@ -563,58 +820,6 @@ export default function App() {
     setMobileView('detail');
   };
 
-  const showSavedConfirmation = useCallback(() => {
-    setSavedToast(true);
-    if (savedTimerRef.current) window.clearTimeout(savedTimerRef.current);
-    savedTimerRef.current = window.setTimeout(() => setSavedToast(false), 2600);
-  }, []);
-
-  const uploadCapturedAudio = useCallback(
-    async (captured: CapturedAudio) => {
-      setUploading(true);
-      setPendingUpload(null);
-
-      try {
-        const form = new FormData();
-        const filename = `recording.${captured.extension}`;
-        form.append('audio', captured.blob, filename);
-        form.append('durationSeconds', String(captured.durationSeconds));
-        form.append('mimeType', captured.mimeType);
-
-        const res = await fetch('/api/recordings', {
-          method: 'POST',
-          body: form,
-        });
-
-        if (!res.ok) {
-          const payload = (await res.json().catch(() => ({}))) as { error?: string };
-          throw new Error(payload.error || `Upload failed (${res.status})`);
-        }
-
-        const data = (await res.json()) as { recording: Recording };
-        setRecordings((prev) => [
-          data.recording,
-          ...prev.filter((r) => r.id !== data.recording.id),
-        ]);
-        setSelectedId(data.recording.id);
-        setSelectedTag(null);
-        setSearchQuery('');
-        setDetailTab('english');
-        setMobileView('detail');
-        showSavedConfirmation();
-      } catch (err) {
-        const message =
-          err instanceof Error
-            ? err.message
-            : 'Could not upload audio. Your recording is still safe in this tab.';
-        setPendingUpload({ captured, error: message });
-      } finally {
-        setUploading(false);
-      }
-    },
-    [showSavedConfirmation],
-  );
-
   const handleStopRecording = async () => {
     const captured = await recorder.stopRecording();
     if (captured) {
@@ -636,12 +841,11 @@ export default function App() {
     });
   };
 
-  const handleDownloadPendingAudio = () => {
-    if (!pendingUpload) return;
+  const handleDownloadPendingAudio = (item: PendingUpload) => {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     triggerDownload(
-      pendingUpload.captured.blob,
-      `tapeleaf-unsaved-${stamp}.${pendingUpload.captured.extension}`,
+      item.captured.blob,
+      `tapeleaf-unsaved-${stamp}.${item.captured.extension}`,
     );
   };
 
@@ -656,6 +860,10 @@ export default function App() {
       const res = await fetch(`/api/recordings/${encodeURIComponent(recording.id)}/reprocess`, {
         method: 'POST',
       });
+      if (res.status === 401) {
+        handleUnauthorized();
+        return;
+      }
       if (!res.ok) throw new Error('Reprocess failed');
       const data = (await res.json()) as { recording: Recording };
       setRecordings((prev) => prev.map((r) => (r.id === recording.id ? data.recording : r)));
@@ -678,6 +886,11 @@ export default function App() {
       const res = await fetch(`/api/recordings/${encodeURIComponent(id)}`, {
         method: 'DELETE',
       });
+      if (res.status === 401) {
+        setRecordings(previous);
+        handleUnauthorized();
+        return;
+      }
       if (!res.ok) {
         setRecordings(previous);
       }
@@ -693,12 +906,26 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
       });
+      if (res.status === 401) {
+        handleUnauthorized();
+        return;
+      }
       if (!res.ok) {
         void fetchRecordings(true);
         return;
       }
-      const data = (await res.json()) as { recording: Recording };
+      const data = (await res.json()) as {
+        recording: Recording;
+        filename: string;
+        markdown: string;
+      };
       setRecordings((prev) => prev.map((r) => (r.id === id ? data.recording : r)));
+      if (data.markdown) {
+        setServerMarkdownCache((prev) => ({
+          ...prev,
+          [id]: { filename: data.filename, markdown: data.markdown },
+        }));
+      }
     } catch {
       void fetchRecordings(true);
     }
@@ -750,15 +977,22 @@ export default function App() {
     void persistPatch(recording.id, { tags: nextTags });
   };
 
-  const selectedMarkdown = useMemo(
-    () => (selectedRecording ? buildObsidianMarkdown(selectedRecording) : ''),
-    [selectedRecording],
-  );
+  const selectedMarkdown = useMemo(() => {
+    if (!selectedRecording) return '';
+    return (
+      serverMarkdownCache[selectedRecording.id]?.markdown ??
+      buildObsidianMarkdown(selectedRecording)
+    );
+  }, [selectedRecording, serverMarkdownCache]);
 
   const selectedFilename = useMemo(() => {
     if (!selectedRecording) return 'note.md';
-    return selectedRecording.filename || buildNoteFilename(selectedRecording);
-  }, [selectedRecording]);
+    return (
+      serverMarkdownCache[selectedRecording.id]?.filename ??
+      selectedRecording.filename ??
+      buildNoteFilename(selectedRecording)
+    );
+  }, [selectedRecording, serverMarkdownCache]);
 
   const handleCopyMarkdown = async () => {
     if (!selectedRecording) return;
@@ -803,7 +1037,80 @@ export default function App() {
     a.remove();
   };
 
+  const uploading = uploadingCount > 0;
   const isActiveRecording = recorder.status === 'recording' || recorder.status === 'paused';
+
+  if (authState === 'checking') {
+    return (
+      <div className="h-dvh w-full bg-[var(--canvas)] text-[var(--ink)] flex items-center justify-center">
+        <div className="flex items-center gap-2.5 text-[13.5px] text-[var(--ink-muted)]">
+          <TapeleafMark />
+          <span>Tapeleaf</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (authState === 'locked') {
+    return (
+      <div className="h-dvh w-full bg-[var(--canvas)] text-[var(--ink)] flex flex-col items-center justify-center px-5">
+        <div className="w-full max-w-[360px] rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-6 sm:p-7 shadow-[0_4px_24px_rgba(0,0,0,0.04)]">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <TapeleafMark />
+              <h1 className="text-[16px] font-semibold tracking-[-0.02em] text-[var(--ink)]">
+                Tapeleaf
+              </h1>
+            </div>
+            <button
+              type="button"
+              onClick={toggleTheme}
+              aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+            >
+              {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
+          </div>
+
+          <p className="mt-5 text-[14px] text-[var(--ink-secondary)]">
+            Enter your passcode to unlock your voice notes.
+          </p>
+
+          {pendingUploads.length > 0 && (
+            <p className="mt-2.5 rounded-xl bg-[var(--surface-subtle)] px-3 py-2 text-[12px] text-[var(--ink-secondary)]">
+              {pendingUploads.length}{' '}
+              {pendingUploads.length === 1 ? 'unsaved recording is' : 'unsaved recordings are'}{' '}
+              preserved in this tab and ready to upload after unlocking.
+            </p>
+          )}
+
+          <form onSubmit={(e) => void handleUnlock(e)} className="mt-4 space-y-3">
+            <input
+              type="password"
+              value={passcodeInput}
+              onChange={(e) => setPasscodeInput(e.target.value)}
+              placeholder="Passcode"
+              autoComplete="current-password"
+              autoFocus
+              aria-label="Passcode"
+              className="h-11 w-full rounded-xl border border-[var(--border)] bg-[var(--canvas)] px-3.5 text-[14px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--border-strong)] focus:outline-none"
+            />
+            {authError && (
+              <p className="text-[12.5px] text-[var(--vermilion)]">{authError}</p>
+            )}
+            <button
+              type="submit"
+              disabled={unlocking || !passcodeInput.trim()}
+              className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[var(--ink)] text-[14px] font-medium text-[var(--canvas)] hover:opacity-90 disabled:opacity-45 transition-opacity cursor-pointer"
+            >
+              <Lock className="h-3.5 w-3.5" />
+              {unlocking ? 'Unlocking…' : 'Unlock'}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-dvh w-full overflow-hidden bg-[var(--canvas)] text-[var(--ink)] flex flex-col lg:flex-row">
@@ -834,6 +1141,17 @@ export default function App() {
                 <Check className="h-3 w-3" />
                 Saved
               </span>
+            )}
+            {passcodeEnabled && (
+              <button
+                type="button"
+                onClick={() => void handleLock()}
+                aria-label="Lock Tapeleaf"
+                title="Lock Tapeleaf"
+                className="flex h-10 w-10 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+              >
+                <Lock className="h-[16px] w-[16px]" />
+              </button>
             )}
             <button
               type="button"
@@ -1070,49 +1388,63 @@ export default function App() {
 
         {/* Bottom Record Dock (Mobile Thumb-Zone + Desktop Left Rail) */}
         <div className="shrink-0 border-t border-[var(--border)] bg-[var(--canvas)]/95 backdrop-blur-md px-4 sm:px-5 pt-3 safe-bottom">
-          {/* Unsaved Upload Recovery Card */}
-          {pendingUpload && (
-            <div className="mb-3 rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] p-3 text-[12.5px]">
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex items-start gap-2">
-                  <AlertCircle className="h-4 w-4 shrink-0 text-[var(--vermilion)] mt-0.5" />
-                  <div>
-                    <p className="font-medium text-[var(--ink)]">
-                      Upload failed — audio kept safely in this tab
-                    </p>
-                    <p className="mt-0.5 text-[11.5px] text-[var(--ink-muted)]">
-                      {pendingUpload.error}
-                    </p>
+          {/* Unsaved Upload Recovery Stack */}
+          {pendingUploads.length > 0 && (
+            <div className="mb-3 space-y-2 max-h-48 overflow-y-auto">
+              {pendingUploads.map((item) => (
+                <div
+                  key={item.clientUploadId}
+                  className="rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] p-3 text-[12.5px]"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="h-4 w-4 shrink-0 text-[var(--vermilion)] mt-0.5" />
+                      <div>
+                        <p className="font-medium text-[var(--ink)]">
+                          Unsaved clip ({formatDuration(item.captured.durationSeconds)})
+                        </p>
+                        <p className="mt-0.5 text-[11.5px] text-[var(--ink-muted)]">
+                          {item.error}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPendingUploads((prev) =>
+                          prev.filter((p) => p.clientUploadId !== item.clientUploadId),
+                        )
+                      }
+                      aria-label="Discard unsaved recording"
+                      title="Discard unsaved recording"
+                      className="shrink-0 rounded p-0.5 text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <div className="mt-2.5 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void uploadCapturedAudio(item.captured, item.clientUploadId)
+                      }
+                      disabled={uploading}
+                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-3 text-[12px] font-medium text-[var(--canvas)] hover:opacity-90 disabled:opacity-50 cursor-pointer"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      Retry upload
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadPendingAudio(item)}
+                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] px-3 text-[12px] font-medium text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      Download Audio
+                    </button>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setPendingUpload(null)}
-                  aria-label="Dismiss unsaved recording"
-                  className="shrink-0 rounded p-0.5 text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              <div className="mt-2.5 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void uploadCapturedAudio(pendingUpload.captured)}
-                  disabled={uploading}
-                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-3 text-[12px] font-medium text-[var(--canvas)] hover:opacity-90 disabled:opacity-50 cursor-pointer"
-                >
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  Retry upload
-                </button>
-                <button
-                  type="button"
-                  onClick={handleDownloadPendingAudio}
-                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] px-3 text-[12px] font-medium text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  Download Audio
-                </button>
-              </div>
+              ))}
             </div>
           )}
 

@@ -1,12 +1,14 @@
 import crypto from 'node:crypto';
 import fsp from 'node:fs/promises';
-import path from 'node:path';
 import YAML, { Scalar } from 'yaml';
 import {
   atomicWriteFile,
   deleteAudioFile,
   ensureStorageDirs,
   getNotesDir,
+  isValidAudioRelPath,
+  isValidId,
+  resolveExistingRegularFile,
   resolveSafeNotePath,
 } from './storage';
 import type { Recording, RecordingStatus } from '../src/types';
@@ -19,6 +21,8 @@ import {
 export interface StoredNoteEntry {
   recording: Recording;
   filename: string;
+  userEditedTitle?: boolean;
+  userEditedTags?: boolean;
 }
 
 interface FrontmatterData {
@@ -35,10 +39,10 @@ interface FrontmatterData {
   error?: string;
 }
 
-const VALID_ID_RE = /^[a-zA-Z0-9_-]{6,64}$/;
+const MAX_UPLOAD_ID_CACHE = 250;
 
 export function isValidRecordingId(id: string): boolean {
-  return VALID_ID_RE.test(id);
+  return isValidId(id);
 }
 
 export function generateRecordingId(): string {
@@ -86,6 +90,10 @@ function doubleQuoted(value: string): Scalar<string> {
   return s;
 }
 
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export function serializeObsidianNote(recording: Recording): string {
   const frontmatter: Record<string, unknown> = {
     id: recording.id,
@@ -128,14 +136,23 @@ export function serializeObsidianNote(recording: Recording): string {
   sections.push(recording.englishTranscript.trim() || '_Transcript pending…_');
 
   if (!recording.isEnglish && recording.originalTranscript?.trim()) {
-    sections.push('', `## Original (${recording.languageName})`, '');
+    sections.push(
+      '',
+      '<!-- tapeleaf:original -->',
+      `## Original (${recording.languageName})`,
+      '',
+    );
     sections.push(recording.originalTranscript.trim());
   }
 
   return `${sections.join('\n')}\n`;
 }
 
-function parseSections(body: string): {
+function parseSections(
+  body: string,
+  isEnglish: boolean,
+  languageName: string,
+): {
   englishTranscript: string;
   originalTranscript?: string;
 } {
@@ -146,22 +163,48 @@ function parseSections(body: string): {
   }
 
   const afterTranscript = normalized.slice(transcriptMatch.index + transcriptMatch[0].length);
-  const originalMatch = /^## Original(?:\s*\([^)]+\))?\s*$/m.exec(afterTranscript);
-
   const cleanText = (text: string) => {
     const trimmed = text.trim();
     return trimmed === '_Transcript pending…_' ? '' : trimmed;
   };
 
-  if (!originalMatch || originalMatch.index === undefined) {
+  // English notes never have an Original section; never split on literal headings inside transcript
+  if (isEnglish) {
+    return { englishTranscript: cleanText(afterTranscript) };
+  }
+
+  // Prefer unambiguous marker written by Tapeleaf
+  const markerPattern = /\n<!-- tapeleaf:original -->\n## Original(?:\s*\([^)]+\))?\s*\n/;
+  const markerMatch = markerPattern.exec(afterTranscript);
+  if (markerMatch && markerMatch.index !== undefined) {
+    const englishPart = cleanText(afterTranscript.slice(0, markerMatch.index));
+    const originalPart = cleanText(
+      afterTranscript.slice(markerMatch.index + markerMatch[0].length),
+    );
     return {
-      englishTranscript: cleanText(afterTranscript),
+      englishTranscript: englishPart,
+      originalTranscript: originalPart || undefined,
     };
   }
 
-  const englishPart = cleanText(afterTranscript.slice(0, originalMatch.index));
+  // Backward-compatible fallback for notes without the marker: match the exact language heading
+  const langHeadingRe = new RegExp(
+    `^## Original \\(${escapeRegExp(languageName)}\\)\\s*$`,
+    'gm',
+  );
+  let lastMatch: RegExpExecArray | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = langHeadingRe.exec(afterTranscript)) !== null) {
+    lastMatch = m;
+  }
+
+  if (!lastMatch || lastMatch.index === undefined) {
+    return { englishTranscript: cleanText(afterTranscript) };
+  }
+
+  const englishPart = cleanText(afterTranscript.slice(0, lastMatch.index));
   const originalPart = cleanText(
-    afterTranscript.slice(originalMatch.index + originalMatch[0].length),
+    afterTranscript.slice(lastMatch.index + lastMatch[0].length),
   );
 
   return {
@@ -184,39 +227,54 @@ export function parseObsidianNote(raw: string, filename: string): Recording | nu
     return null;
   }
 
-  const id = typeof fm.id === 'string' && isValidRecordingId(fm.id)
-    ? fm.id
-    : path.basename(filename, '.md').replace(/[^a-zA-Z0-9_-]/g, '_');
+  // Strictly require valid Tapeleaf metadata before indexing or rewriting any note
+  if (typeof fm.id !== 'string' || !isValidRecordingId(fm.id.trim())) {
+    return null;
+  }
+  const id = fm.id.trim();
 
-  const language = typeof fm.language === 'string' && fm.language.trim()
-    ? fm.language.trim().toLowerCase()
-    : 'en';
-  const languageName = typeof fm.language_name === 'string' && fm.language_name.trim()
-    ? fm.language_name.trim()
-    : language === 'en'
-      ? 'English'
-      : language.toUpperCase();
+  if (typeof fm.audio !== 'string' || !isValidAudioRelPath(fm.audio.trim(), id)) {
+    return null;
+  }
+  const audioPath = fm.audio.trim();
 
-  const statusRaw = typeof fm.status === 'string' ? fm.status.trim().toLowerCase() : 'ready';
-  const status: RecordingStatus =
-    statusRaw === 'processing' || statusRaw === 'failed' || statusRaw === 'ready'
-      ? statusRaw
-      : 'ready';
+  const statusRaw = typeof fm.status === 'string' ? fm.status.trim().toLowerCase() : '';
+  if (statusRaw !== 'processing' && statusRaw !== 'failed' && statusRaw !== 'ready') {
+    return null;
+  }
+  const status: RecordingStatus = statusRaw;
 
-  const { englishTranscript, originalTranscript } = parseSections(fmMatch[2]);
-  const audioPath = typeof fm.audio === 'string' ? fm.audio.trim() : '';
+  const language =
+    typeof fm.language === 'string' && fm.language.trim()
+      ? fm.language.trim().toLowerCase()
+      : 'en';
+  const languageName =
+    typeof fm.language_name === 'string' && fm.language_name.trim()
+      ? fm.language_name.trim()
+      : language === 'en'
+        ? 'English'
+        : language.toUpperCase();
+  const isEnglish = language === 'en';
+
+  const { englishTranscript, originalTranscript } = parseSections(
+    fmMatch[2],
+    isEnglish,
+    languageName,
+  );
 
   return {
     id,
     filename,
-    title: typeof fm.title === 'string' && fm.title.trim() ? fm.title.trim() : 'Untitled voice note',
-    created: typeof fm.created === 'string' && fm.created.trim()
-      ? fm.created.trim()
-      : new Date().toISOString(),
+    title:
+      typeof fm.title === 'string' && fm.title.trim() ? fm.title.trim() : 'Untitled voice note',
+    created:
+      typeof fm.created === 'string' && fm.created.trim()
+        ? fm.created.trim()
+        : new Date().toISOString(),
     durationSeconds: parseDurationToSeconds(fm.duration),
     language,
     languageName,
-    isEnglish: language === 'en',
+    isEnglish,
     status,
     summary: typeof fm.summary === 'string' ? fm.summary.trim() : '',
     tags: normalizeTags(fm.tags),
@@ -224,46 +282,69 @@ export function parseObsidianNote(raw: string, filename: string): Recording | nu
     audioUrl: `/api/recordings/${encodeURIComponent(id)}/audio`,
     englishTranscript,
     originalTranscript,
-    errorMessage: typeof fm.error === 'string' && fm.error.trim() ? fm.error.trim() : undefined,
+    errorMessage:
+      typeof fm.error === 'string' && fm.error.trim() ? fm.error.trim() : undefined,
   };
 }
 
 class NoteStore {
   private entries = new Map<string, StoredNoteEntry>();
+  private uploadIdToRecId = new Map<string, string>();
   private initialized = false;
+  private writeQueue: Promise<unknown> = Promise.resolve();
+
+  private withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.writeQueue.then(fn, fn);
+    this.writeQueue = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  private rememberUploadId(clientUploadId: string | undefined, recId: string): void {
+    if (!clientUploadId) return;
+    this.uploadIdToRecId.set(clientUploadId, recId);
+    if (this.uploadIdToRecId.size > MAX_UPLOAD_ID_CACHE) {
+      const oldestKey = this.uploadIdToRecId.keys().next().value;
+      if (oldestKey) this.uploadIdToRecId.delete(oldestKey);
+    }
+  }
 
   async init(): Promise<void> {
-    await ensureStorageDirs();
-    const notesDir = getNotesDir();
-    const files = await fsp.readdir(notesDir);
-    const nextMap = new Map<string, StoredNoteEntry>();
+    await this.withWriteLock(async () => {
+      await ensureStorageDirs();
+      const notesDir = getNotesDir();
+      const files = await fsp.readdir(notesDir);
+      const nextMap = new Map<string, StoredNoteEntry>();
 
-    for (const file of files) {
-      if (!file.endsWith('.md')) continue;
-      const absPath = resolveSafeNotePath(file);
-      if (!absPath) continue;
+      for (const file of files) {
+        if (!file.endsWith('.md')) continue;
+        const resolved = await resolveExistingRegularFile(file);
+        if (!resolved) continue;
 
-      try {
-        const raw = await fsp.readFile(absPath, 'utf8');
-        const parsed = parseObsidianNote(raw, file);
-        if (!parsed) continue;
+        try {
+          const raw = await fsp.readFile(resolved.absPath, 'utf8');
+          const parsed = parseObsidianNote(raw, file);
+          if (!parsed) continue;
 
-        // Startup recovery: reset interrupted processing notes to failed (retryable)
-        if (parsed.status === 'processing') {
-          parsed.status = 'failed';
-          parsed.errorMessage =
-            'Processing was interrupted when the server restarted. Tap Reprocess to retry.';
-          await atomicWriteFile(absPath, serializeObsidianNote(parsed));
+          // Startup recovery: reset interrupted processing notes to failed (retryable)
+          if (parsed.status === 'processing') {
+            parsed.status = 'failed';
+            parsed.errorMessage =
+              'Processing was interrupted when the server restarted. Tap Reprocess to retry.';
+            await atomicWriteFile(resolved.absPath, serializeObsidianNote(parsed));
+          }
+
+          nextMap.set(parsed.id, { recording: parsed, filename: file });
+        } catch (err) {
+          console.warn(`Skipping unreadable note ${file}:`, err);
         }
-
-        nextMap.set(parsed.id, { recording: parsed, filename: file });
-      } catch (err) {
-        console.warn(`Skipping unreadable note ${file}:`, err);
       }
-    }
 
-    this.entries = nextMap;
-    this.initialized = true;
+      this.entries = nextMap;
+      this.initialized = true;
+    });
   }
 
   private async ensureInit(): Promise<void> {
@@ -300,13 +381,19 @@ class NoteStore {
       if (!abs) continue;
       try {
         await fsp.access(abs);
-        // Exists on disk (possibly external file in vault), pick next suffix
       } catch {
         return candidate;
       }
     }
 
     return `${datePart}-${baseSlug}-${recording.id.slice(-4)}.md`;
+  }
+
+  async findByClientUploadId(clientUploadId: string): Promise<StoredNoteEntry | null> {
+    await this.ensureInit();
+    const recId = this.uploadIdToRecId.get(clientUploadId);
+    if (!recId) return null;
+    return this.entries.get(recId) ?? null;
   }
 
   async list(filters?: { q?: string; tag?: string }): Promise<{
@@ -360,80 +447,59 @@ class NoteStore {
     return this.entries.get(id) ?? null;
   }
 
-  async has(id: string): Promise<boolean> {
-    await this.ensureInit();
-    return this.entries.has(id);
-  }
-
   async createStub(params: {
     id: string;
     audioPath: string;
     durationSeconds: number;
     mimeType?: string;
-  }): Promise<StoredNoteEntry> {
+    clientUploadId?: string;
+  }): Promise<{ entry: StoredNoteEntry; deduplicated: boolean }> {
     await this.ensureInit();
-    const recording: Recording = {
-      id: params.id,
-      title: 'Voice note',
-      created: new Date().toISOString(),
-      durationSeconds: Math.max(0, Math.round(params.durationSeconds)),
-      language: 'en',
-      languageName: 'English',
-      isEnglish: true,
-      status: 'processing',
-      summary: '',
-      tags: [],
-      audioPath: params.audioPath,
-      audioUrl: `/api/recordings/${encodeURIComponent(params.id)}/audio`,
-      audioMimeType: params.mimeType,
-      englishTranscript: '',
-    };
+    return this.withWriteLock(async () => {
+      if (params.clientUploadId) {
+        const existingId = this.uploadIdToRecId.get(params.clientUploadId);
+        const existing = existingId ? this.entries.get(existingId) : undefined;
+        if (existing) {
+          return { entry: existing, deduplicated: true };
+        }
+      }
 
-    const filename = await this.pickAvailableFilename(recording);
-    recording.filename = filename;
-    const absPath = resolveSafeNotePath(filename);
-    if (!absPath) throw new Error('Invalid note filename');
+      const recording: Recording = {
+        id: params.id,
+        title: 'Voice note',
+        created: new Date().toISOString(),
+        durationSeconds: Math.max(0, Math.round(params.durationSeconds)),
+        language: 'en',
+        languageName: 'English',
+        isEnglish: true,
+        status: 'processing',
+        summary: '',
+        tags: [],
+        audioPath: params.audioPath,
+        audioUrl: `/api/recordings/${encodeURIComponent(params.id)}/audio`,
+        audioMimeType: params.mimeType,
+        englishTranscript: '',
+      };
 
-    await atomicWriteFile(absPath, serializeObsidianNote(recording));
-    const entry: StoredNoteEntry = { recording, filename };
-    this.entries.set(recording.id, entry);
-    return entry;
+      const filename = await this.pickAvailableFilename(recording);
+      recording.filename = filename;
+      const absPath = resolveSafeNotePath(filename);
+      if (!absPath) throw new Error('Invalid note filename');
+
+      await atomicWriteFile(absPath, serializeObsidianNote(recording));
+      const entry: StoredNoteEntry = { recording, filename };
+      this.entries.set(recording.id, entry);
+      this.rememberUploadId(params.clientUploadId, recording.id);
+      return { entry, deduplicated: false };
+    });
   }
 
-  async update(
+  private async writeUpdatedEntry(
     id: string,
-    patch: Partial<
-      Pick<
-        Recording,
-        | 'title'
-        | 'summary'
-        | 'tags'
-        | 'language'
-        | 'languageName'
-        | 'isEnglish'
-        | 'status'
-        | 'englishTranscript'
-        | 'originalTranscript'
-        | 'errorMessage'
-        | 'durationSeconds'
-      >
-    >,
-  ): Promise<StoredNoteEntry | null> {
-    await this.ensureInit();
-    const existing = this.entries.get(id);
-    if (!existing) return null;
-
-    const updated: Recording = {
-      ...existing.recording,
-      ...patch,
-      title:
-        patch.title !== undefined
-          ? patch.title.trim() || existing.recording.title
-          : existing.recording.title,
-      tags: patch.tags !== undefined ? normalizeTags(patch.tags) : existing.recording.tags,
-      audioUrl: `/api/recordings/${encodeURIComponent(id)}/audio`,
-    };
-
+    existing: StoredNoteEntry,
+    updated: Recording,
+    flags?: { userEditedTitle?: boolean; userEditedTags?: boolean },
+  ): Promise<StoredNoteEntry> {
     if (updated.status !== 'failed') {
       updated.errorMessage = undefined;
     }
@@ -442,45 +508,167 @@ class NoteStore {
     const newFilename = await this.pickAvailableFilename(updated, oldFilename);
     updated.filename = newFilename;
     const newAbsPath = resolveSafeNotePath(newFilename);
-    const oldAbsPath = resolveSafeNotePath(oldFilename);
     if (!newAbsPath) throw new Error('Invalid target note filename');
 
     await atomicWriteFile(newAbsPath, serializeObsidianNote(updated));
 
-    if (oldFilename !== newFilename && oldAbsPath) {
-      await fsp.unlink(oldAbsPath).catch((err: NodeJS.ErrnoException) => {
-        if (err.code !== 'ENOENT') throw err;
-      });
+    if (oldFilename !== newFilename) {
+      const oldResolved = await resolveExistingRegularFile(oldFilename);
+      if (oldResolved) {
+        await fsp.unlink(oldResolved.absPath).catch((err: NodeJS.ErrnoException) => {
+          if (err.code !== 'ENOENT') throw err;
+        });
+      }
     }
 
-    const entry: StoredNoteEntry = { recording: updated, filename: newFilename };
+    const entry: StoredNoteEntry = {
+      recording: updated,
+      filename: newFilename,
+      userEditedTitle: flags?.userEditedTitle ?? existing.userEditedTitle,
+      userEditedTags: flags?.userEditedTags ?? existing.userEditedTags,
+    };
     this.entries.set(id, entry);
     return entry;
   }
 
+  async updateUserEdits(
+    id: string,
+    patch: { title?: string; tags?: string[] },
+  ): Promise<StoredNoteEntry | null> {
+    await this.ensureInit();
+    return this.withWriteLock(async () => {
+      const existing = this.entries.get(id);
+      if (!existing) return null;
+
+      const updated: Recording = {
+        ...existing.recording,
+        title:
+          patch.title !== undefined
+            ? patch.title.trim() || existing.recording.title
+            : existing.recording.title,
+        tags: patch.tags !== undefined ? normalizeTags(patch.tags) : existing.recording.tags,
+        audioUrl: `/api/recordings/${encodeURIComponent(id)}/audio`,
+      };
+
+      return this.writeUpdatedEntry(id, existing, updated, {
+        userEditedTitle:
+          patch.title !== undefined ? true : existing.userEditedTitle,
+        userEditedTags:
+          patch.tags !== undefined ? true : existing.userEditedTags,
+      });
+    });
+  }
+
+  async markProcessing(id: string): Promise<StoredNoteEntry | null> {
+    await this.ensureInit();
+    return this.withWriteLock(async () => {
+      const existing = this.entries.get(id);
+      if (!existing) return null;
+
+      const updated: Recording = {
+        ...existing.recording,
+        status: 'processing',
+        errorMessage: undefined,
+        audioUrl: `/api/recordings/${encodeURIComponent(id)}/audio`,
+      };
+
+      return this.writeUpdatedEntry(id, existing, updated);
+    });
+  }
+
+  async applyAnalysis(
+    id: string,
+    analysis: {
+      title: string;
+      summary: string;
+      tags: string[];
+      language: string;
+      languageName: string;
+      isEnglish: boolean;
+      englishTranscript: string;
+      originalTranscript?: string;
+    },
+  ): Promise<StoredNoteEntry | null> {
+    await this.ensureInit();
+    return this.withWriteLock(async () => {
+      const existing = this.entries.get(id);
+      if (!existing) return null; // Deleted while Gemini was running; never resurrect
+
+      const updated: Recording = {
+        ...existing.recording,
+        status: 'ready',
+        // Preserve any title or tags the user explicitly edited while processing ran
+        title: existing.userEditedTitle
+          ? existing.recording.title
+          : analysis.title.trim() || existing.recording.title,
+        tags: existing.userEditedTags
+          ? existing.recording.tags
+          : normalizeTags(analysis.tags),
+        summary: analysis.summary,
+        language: analysis.language,
+        languageName: analysis.languageName,
+        isEnglish: analysis.isEnglish,
+        englishTranscript: analysis.englishTranscript,
+        originalTranscript: analysis.isEnglish ? undefined : analysis.originalTranscript,
+        errorMessage: undefined,
+        audioUrl: `/api/recordings/${encodeURIComponent(id)}/audio`,
+      };
+
+      return this.writeUpdatedEntry(id, existing, updated);
+    });
+  }
+
+  async markFailed(id: string, errorMessage: string): Promise<StoredNoteEntry | null> {
+    await this.ensureInit();
+    return this.withWriteLock(async () => {
+      const existing = this.entries.get(id);
+      if (!existing) return null; // Deleted while running; never resurrect
+
+      const updated: Recording = {
+        ...existing.recording,
+        status: 'failed',
+        errorMessage,
+        audioUrl: `/api/recordings/${encodeURIComponent(id)}/audio`,
+      };
+
+      return this.writeUpdatedEntry(id, existing, updated);
+    });
+  }
+
   async delete(id: string): Promise<boolean> {
     await this.ensureInit();
-    const existing = this.entries.get(id);
-    if (!existing) return false;
+    return this.withWriteLock(async () => {
+      const existing = this.entries.get(id);
+      if (!existing) return false;
 
-    this.entries.delete(id);
+      this.entries.delete(id);
 
-    const noteAbsPath = resolveSafeNotePath(existing.filename);
-    if (noteAbsPath) {
-      await fsp.unlink(noteAbsPath).catch((err: NodeJS.ErrnoException) => {
-        if (err.code !== 'ENOENT') throw err;
-      });
-    }
-    if (existing.recording.audioPath) {
-      await deleteAudioFile(existing.recording.audioPath);
-    }
+      const noteResolved = await resolveExistingRegularFile(existing.filename);
+      if (noteResolved) {
+        await fsp.unlink(noteResolved.absPath).catch((err: NodeJS.ErrnoException) => {
+          if (err.code !== 'ENOENT') throw err;
+        });
+      }
+      if (existing.recording.audioPath) {
+        await deleteAudioFile(existing.recording.audioPath, existing.recording.id);
+      }
 
-    return true;
+      return true;
+    });
   }
 
   async getMarkdown(id: string): Promise<{ filename: string; markdown: string } | null> {
     const entry = await this.getEntry(id);
     if (!entry) return null;
+    const resolved = await resolveExistingRegularFile(entry.filename);
+    if (resolved) {
+      try {
+        const diskMarkdown = await fsp.readFile(resolved.absPath, 'utf8');
+        return { filename: entry.filename, markdown: diskMarkdown };
+      } catch {
+        // fall through to serializer
+      }
+    }
     return {
       filename: entry.filename,
       markdown: serializeObsidianNote(entry.recording),

@@ -5,6 +5,20 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import type { Context } from 'hono';
 
+const SUPPORTED_AUDIO_EXTS = new Set([
+  'webm',
+  'm4a',
+  'mp4',
+  'ogg',
+  'wav',
+  'mp3',
+  'flac',
+  'aac',
+]);
+
+const VALID_ID_RE = /^[a-zA-Z0-9_-]{6,64}$/;
+const VALID_AUDIO_REL_RE = /^audio\/([a-zA-Z0-9_-]{6,64})\.(webm|m4a|mp4|ogg|wav|mp3|flac|aac)$/;
+
 export function getDataDir(): string {
   return path.resolve(process.env.DATA_DIR?.trim() || path.join(process.cwd(), 'data'));
 }
@@ -21,6 +35,17 @@ export async function ensureStorageDirs(): Promise<void> {
   await fsp.mkdir(getAudioDir(), { recursive: true });
 }
 
+export function isValidId(id: string): boolean {
+  return VALID_ID_RE.test(id);
+}
+
+export function isValidAudioRelPath(audioPath: string, expectedId?: string): boolean {
+  const match = VALID_AUDIO_REL_RE.exec(audioPath.trim());
+  if (!match) return false;
+  if (expectedId && match[1] !== expectedId) return false;
+  return true;
+}
+
 export function extensionForMime(mimeType: string, fallbackName?: string): string {
   const lower = mimeType.toLowerCase();
   if (lower.includes('mp4') || lower.includes('m4a') || lower.includes('aac')) return 'm4a';
@@ -32,7 +57,7 @@ export function extensionForMime(mimeType: string, fallbackName?: string): strin
 
   if (fallbackName) {
     const ext = path.extname(fallbackName).replace(/^\./, '').toLowerCase();
-    if (['webm', 'm4a', 'mp4', 'ogg', 'wav', 'mp3', 'flac', 'aac'].includes(ext)) {
+    if (SUPPORTED_AUDIO_EXTS.has(ext)) {
       return ext === 'mp4' ? 'm4a' : ext;
     }
   }
@@ -71,7 +96,48 @@ export function resolveSafeNotePath(relativePath: string): string | null {
   return resolved;
 }
 
-export async function atomicWriteFile(targetPath: string, data: string | Uint8Array): Promise<void> {
+/**
+ * Verifies an existing file under notes/ is a regular, non-symlink file whose
+ * realpath stays strictly inside the real notes directory.
+ */
+export async function resolveExistingRegularFile(
+  relativePath: string,
+): Promise<{ absPath: string; stat: fs.Stats } | null> {
+  const candidate = resolveSafeNotePath(relativePath);
+  if (!candidate) return null;
+
+  try {
+    const lstat = await fsp.lstat(candidate);
+    if (!lstat.isFile() || lstat.isSymbolicLink()) {
+      return null;
+    }
+
+    const [realNotesDir, realTarget] = await Promise.all([
+      fsp.realpath(getNotesDir()),
+      fsp.realpath(candidate),
+    ]);
+    if (!realTarget.startsWith(`${realNotesDir}${path.sep}`)) {
+      return null;
+    }
+
+    return { absPath: realTarget, stat: lstat };
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveExistingAudioFile(
+  audioPath: string,
+  expectedId?: string,
+): Promise<{ absPath: string; stat: fs.Stats } | null> {
+  if (!isValidAudioRelPath(audioPath, expectedId)) return null;
+  return resolveExistingRegularFile(audioPath);
+}
+
+export async function atomicWriteFile(
+  targetPath: string,
+  data: string | Uint8Array,
+): Promise<void> {
   const dir = path.dirname(targetPath);
   await fsp.mkdir(dir, { recursive: true });
   const tmpPath = `${targetPath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
@@ -98,6 +164,9 @@ export async function saveAudioFile(
   mimeType: string,
   originalFilename?: string,
 ): Promise<SavedAudio> {
+  if (!isValidId(id)) {
+    throw new Error('Invalid recording ID');
+  }
   await ensureStorageDirs();
   const extension = extensionForMime(mimeType, originalFilename);
   const audioPath = `audio/${id}.${extension}`;
@@ -115,15 +184,18 @@ export async function saveAudioFile(
   };
 }
 
-export async function deleteAudioFile(audioPath: string): Promise<void> {
-  const absPath = resolveSafeNotePath(audioPath);
-  if (!absPath) return;
-  await fsp.unlink(absPath).catch((err: NodeJS.ErrnoException) => {
+export async function deleteAudioFile(audioPath: string, expectedId?: string): Promise<void> {
+  const resolved = await resolveExistingAudioFile(audioPath, expectedId);
+  if (!resolved) return;
+  await fsp.unlink(resolved.absPath).catch((err: NodeJS.ErrnoException) => {
     if (err.code !== 'ENOENT') throw err;
   });
 }
 
-function parseRangeHeader(rangeHeader: string, fileSize: number): { start: number; end: number } | null {
+function parseRangeHeader(
+  rangeHeader: string,
+  fileSize: number,
+): { start: number; end: number } | null {
   const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader.trim());
   if (!match) return null;
 
@@ -155,22 +227,19 @@ function parseRangeHeader(rangeHeader: string, fileSize: number): { start: numbe
 export async function streamAudioResponse(
   c: Context,
   audioPath: string,
+  expectedId: string,
   downloadFilename?: string,
 ): Promise<Response> {
-  const absPath = resolveSafeNotePath(audioPath);
-  if (!absPath) {
-    return c.json({ error: 'Invalid audio path' }, 400);
-  }
-
-  let stat: fs.Stats;
-  try {
-    stat = await fsp.stat(absPath);
-  } catch {
+  const resolved = await resolveExistingAudioFile(audioPath, expectedId);
+  if (!resolved) {
     return c.json({ error: 'Audio file not found' }, 404);
   }
 
+  const { absPath, stat } = resolved;
   const fileSize = stat.size;
   const contentType = mimeForExtension(absPath);
+  const isHead = c.req.method.toUpperCase() === 'HEAD';
+
   const headers = new Headers({
     'Content-Type': contentType,
     'Accept-Ranges': 'bytes',
@@ -198,6 +267,10 @@ export async function streamAudioResponse(
     headers.set('Content-Range', `bytes ${range.start}-${range.end}/${fileSize}`);
     headers.set('Content-Length', String(chunkLength));
 
+    if (isHead) {
+      return new Response(null, { status: 206, headers });
+    }
+
     const nodeStream = fs.createReadStream(absPath, {
       start: range.start,
       end: range.end,
@@ -207,6 +280,10 @@ export async function streamAudioResponse(
   }
 
   headers.set('Content-Length', String(fileSize));
+  if (isHead) {
+    return new Response(null, { status: 200, headers });
+  }
+
   const nodeStream = fs.createReadStream(absPath);
   const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>;
   return new Response(webStream, { status: 200, headers });

@@ -34,7 +34,11 @@ export function extensionForMimeType(mimeType: string): string {
   return 'webm';
 }
 
-export function useRecorder() {
+export interface UseRecorderOptions {
+  onInterruptedCapture?: (audio: CapturedAudio) => void;
+}
+
+export function useRecorder(options?: UseRecorderOptions) {
   const [status, setStatus] = useState<RecorderStatus>('idle');
   const [elapsedMs, setElapsedMs] = useState(0);
   const [levels, setLevels] = useState<number[]>(EMPTY_LEVELS);
@@ -53,6 +57,12 @@ export function useRecorder() {
   const levelHistoryRef = useRef<number[]>([...EMPTY_LEVELS]);
   const lastSampleTsRef = useRef<number>(0);
 
+  const finalizedRef = useRef<boolean>(false);
+  const discardOnStopRef = useRef<boolean>(false);
+  const stopResolverRef = useRef<((audio: CapturedAudio | null) => void) | null>(null);
+  const onInterruptedRef = useRef(options?.onInterruptedCapture);
+  onInterruptedRef.current = options?.onInterruptedCapture;
+
   const isSupported =
     typeof navigator !== 'undefined' &&
     Boolean(navigator.mediaDevices?.getUserMedia) &&
@@ -70,6 +80,7 @@ export function useRecorder() {
     }
     if (streamRef.current) {
       for (const track of streamRef.current.getTracks()) {
+        track.onended = null;
         track.stop();
       }
       streamRef.current = null;
@@ -82,8 +93,71 @@ export function useRecorder() {
     mediaRecorderRef.current = null;
   }, []);
 
+  const finalizeCapture = useCallback(
+    (resolvedMime: string, wasInterrupted: boolean) => {
+      if (finalizedRef.current) return;
+      finalizedRef.current = true;
+
+      const finalElapsedMs =
+        statusRef.current === 'recording'
+          ? accumulatedMsRef.current + (performance.now() - startedAtRef.current)
+          : accumulatedMsRef.current;
+
+      const discard = discardOnStopRef.current;
+      const chunks = chunksRef.current;
+      const resolver = stopResolverRef.current;
+
+      chunksRef.current = [];
+      stopResolverRef.current = null;
+      discardOnStopRef.current = false;
+      accumulatedMsRef.current = 0;
+      setElapsedMs(0);
+      levelHistoryRef.current = [...EMPTY_LEVELS];
+      setLevels(EMPTY_LEVELS);
+      releaseHardware();
+      updateStatus('idle');
+
+      if (discard) {
+        resolver?.(null);
+        return;
+      }
+
+      const blob = new Blob(chunks, { type: resolvedMime });
+      const captured: CapturedAudio | null =
+        blob.size > 0
+          ? {
+              blob,
+              mimeType: resolvedMime,
+              durationSeconds: Math.max(1, Math.round(finalElapsedMs / 1000)),
+              extension: extensionForMimeType(resolvedMime),
+            }
+          : null;
+
+      if (resolver) {
+        resolver(captured);
+      } else if (wasInterrupted) {
+        if (captured) {
+          setError('Recording ended unexpectedly — saving the audio captured so far.');
+          onInterruptedRef.current?.(captured);
+        } else {
+          setError('Recording was interrupted by the browser before any audio was captured.');
+        }
+      }
+    },
+    [releaseHardware, updateStatus],
+  );
+
   useEffect(() => {
     return () => {
+      discardOnStopRef.current = true;
+      const rec = mediaRecorderRef.current;
+      if (rec && rec.state !== 'inactive') {
+        try {
+          rec.stop();
+        } catch {
+          // ignore
+        }
+      }
       releaseHardware();
     };
   }, [releaseHardware]);
@@ -91,24 +165,28 @@ export function useRecorder() {
   const startMeterLoop = useCallback(() => {
     const tick = (ts: number) => {
       if (statusRef.current === 'recording') {
-        const currentElapsed = accumulatedMsRef.current + (performance.now() - startedAtRef.current);
+        const currentElapsed =
+          accumulatedMsRef.current + (performance.now() - startedAtRef.current);
         setElapsedMs(currentElapsed);
 
-        if (analyserRef.current && ts - lastSampleTsRef.current >= 55) {
+        if (ts - lastSampleTsRef.current >= 55) {
           lastSampleTsRef.current = ts;
-          const analyser = analyserRef.current;
-          const data = new Uint8Array(analyser.fftSize);
-          analyser.getByteTimeDomainData(data);
+          let level = 0.14;
+          if (analyserRef.current) {
+            const analyser = analyserRef.current;
+            const data = new Uint8Array(analyser.fftSize);
+            analyser.getByteTimeDomainData(data);
 
-          let sumSquares = 0;
-          for (let i = 0; i < data.length; i += 1) {
-            const norm = (data[i] - 128) / 128;
-            sumSquares += norm * norm;
+            let sumSquares = 0;
+            for (let i = 0; i < data.length; i += 1) {
+              const norm = (data[i] - 128) / 128;
+              sumSquares += norm * norm;
+            }
+            const rms = Math.sqrt(sumSquares / data.length);
+            level = Math.min(1, Math.max(0.08, Math.pow(rms * 3.8, 0.78)));
           }
-          const rms = Math.sqrt(sumSquares / data.length);
-          const boosted = Math.min(1, Math.max(0.08, Math.pow(rms * 3.8, 0.78)));
 
-          const nextHistory = [...levelHistoryRef.current.slice(1), boosted];
+          const nextHistory = [...levelHistoryRef.current.slice(1), level];
           levelHistoryRef.current = nextHistory;
           setLevels(nextHistory);
         }
@@ -146,23 +224,70 @@ export function useRecorder() {
       }
 
       const recorder = new MediaRecorder(stream, options);
+      const resolvedMime = recorder.mimeType || supportedMimeType || 'audio/webm';
+
       chunksRef.current = [];
+      finalizedRef.current = false;
+      discardOnStopRef.current = false;
+      stopResolverRef.current = null;
+
+      // Install all lifecycle handlers at startup so unexpected stops still preserve chunks
       recorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
           chunksRef.current.push(event.data);
         }
       };
 
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      if (AudioCtx) {
-        const audioCtx = new AudioCtx();
-        const source = audioCtx.createMediaStreamSource(stream);
-        const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 256;
-        analyser.smoothingTimeConstant = 0.75;
-        source.connect(analyser);
-        audioCtxRef.current = audioCtx;
-        analyserRef.current = analyser;
+      recorder.onstop = () => {
+        const mime = recorder.mimeType || resolvedMime;
+        const wasInterrupted = !stopResolverRef.current && !discardOnStopRef.current;
+        finalizeCapture(mime, wasInterrupted);
+      };
+
+      recorder.onerror = () => {
+        const mime = recorder.mimeType || resolvedMime;
+        if (recorder.state !== 'inactive') {
+          try {
+            recorder.stop();
+            return;
+          } catch {
+            // fall through to finalize immediately
+          }
+        }
+        finalizeCapture(mime, true);
+      };
+
+      for (const track of stream.getAudioTracks()) {
+        track.onended = () => {
+          if (recorder.state !== 'inactive') {
+            try {
+              recorder.stop();
+            } catch {
+              finalizeCapture(recorder.mimeType || resolvedMime, true);
+            }
+          }
+        };
+      }
+
+      // Level meter is strictly optional: never let AudioContext failure abort capture
+      try {
+        const AudioCtx =
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext?: typeof AudioContext })
+            .webkitAudioContext;
+        if (AudioCtx) {
+          const audioCtx = new AudioCtx();
+          const source = audioCtx.createMediaStreamSource(stream);
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 256;
+          analyser.smoothingTimeConstant = 0.75;
+          source.connect(analyser);
+          audioCtxRef.current = audioCtx;
+          analyserRef.current = analyser;
+        }
+      } catch {
+        audioCtxRef.current = null;
+        analyserRef.current = null;
       }
 
       mediaRecorderRef.current = recorder;
@@ -172,7 +297,8 @@ export function useRecorder() {
       setLevels(EMPTY_LEVELS);
       setElapsedMs(0);
 
-      recorder.start(250);
+      // Start without a short timeslice so browsers emit cleaner, more seekable containers
+      recorder.start();
       updateStatus('recording');
       startMeterLoop();
     } catch (err) {
@@ -180,14 +306,14 @@ export function useRecorder() {
       updateStatus('idle');
       const name = err instanceof Error ? err.name : '';
       if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
-        setError('Microphone permission was denied. Allow mic access in browser settings or try a sample capture.');
+        setError('Microphone permission was denied. Allow mic access in browser settings.');
       } else if (name === 'NotFoundError') {
         setError('No microphone detected on this device.');
       } else {
         setError('Could not start the microphone. Check device permissions and try again.');
       }
     }
-  }, [isSupported, releaseHardware, startMeterLoop, supportedMimeType, updateStatus]);
+  }, [finalizeCapture, isSupported, releaseHardware, startMeterLoop, supportedMimeType, updateStatus]);
 
   const pauseRecording = useCallback(() => {
     const recorder = mediaRecorderRef.current;
@@ -211,77 +337,42 @@ export function useRecorder() {
   }, [updateStatus]);
 
   const cancelRecording = useCallback(() => {
+    discardOnStopRef.current = true;
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state !== 'inactive') {
-      recorder.ondataavailable = null;
-      recorder.onstop = null;
       try {
         recorder.stop();
+        return;
       } catch {
-        // ignore
+        // fall through
       }
     }
-    chunksRef.current = [];
-    accumulatedMsRef.current = 0;
-    setElapsedMs(0);
-    levelHistoryRef.current = [...EMPTY_LEVELS];
-    setLevels(EMPTY_LEVELS);
-    releaseHardware();
-    updateStatus('idle');
-  }, [releaseHardware, updateStatus]);
+    finalizeCapture(supportedMimeType || 'audio/webm', false);
+  }, [finalizeCapture, supportedMimeType]);
 
   const stopRecording = useCallback((): Promise<CapturedAudio | null> => {
     return new Promise((resolve) => {
       const recorder = mediaRecorderRef.current;
       if (!recorder || recorder.state === 'inactive') {
-        releaseHardware();
-        updateStatus('idle');
-        resolve(null);
+        if (!finalizedRef.current && chunksRef.current.length > 0) {
+          stopResolverRef.current = resolve;
+          finalizeCapture(supportedMimeType || 'audio/webm', false);
+        } else {
+          releaseHardware();
+          updateStatus('idle');
+          resolve(null);
+        }
         return;
       }
 
-      const finalElapsedMs =
-        statusRef.current === 'recording'
-          ? accumulatedMsRef.current + (performance.now() - startedAtRef.current)
-          : accumulatedMsRef.current;
-
-      const resolvedMime = recorder.mimeType || supportedMimeType || 'audio/webm';
-
-      recorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: resolvedMime });
-        chunksRef.current = [];
-        accumulatedMsRef.current = 0;
-        setElapsedMs(0);
-        levelHistoryRef.current = [...EMPTY_LEVELS];
-        setLevels(EMPTY_LEVELS);
-        releaseHardware();
-        updateStatus('idle');
-
-        if (blob.size === 0) {
-          resolve(null);
-          return;
-        }
-
-        resolve({
-          blob,
-          mimeType: resolvedMime,
-          durationSeconds: Math.max(1, Math.round(finalElapsedMs / 1000)),
-          extension: extensionForMimeType(resolvedMime),
-        });
-      };
-
+      stopResolverRef.current = resolve;
       try {
-        if (recorder.state === 'recording') {
-          recorder.requestData();
-        }
         recorder.stop();
       } catch {
-        releaseHardware();
-        updateStatus('idle');
-        resolve(null);
+        finalizeCapture(recorder.mimeType || supportedMimeType || 'audio/webm', false);
       }
     });
-  }, [releaseHardware, supportedMimeType, updateStatus]);
+  }, [finalizeCapture, releaseHardware, supportedMimeType, updateStatus]);
 
   return {
     status,

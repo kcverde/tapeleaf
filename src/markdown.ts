@@ -68,11 +68,13 @@ export function buildObsidianMarkdown(recording: Recording): string {
     `summary: ${yamlQuote(recording.summary)}`,
     tagsBlock,
     `audio: ${recording.audioPath}`,
-    '---',
-    '',
-    `# ${recording.title}`,
-    '',
   ];
+
+  if (recording.status === 'failed' && recording.errorMessage) {
+    lines.push(`error: ${yamlQuote(recording.errorMessage)}`);
+  }
+
+  lines.push('---', '', `# ${recording.title}`, '');
 
   if (recording.summary.trim()) {
     lines.push(`> ${recording.summary.trim()}`, '');
@@ -83,7 +85,12 @@ export function buildObsidianMarkdown(recording: Recording): string {
   lines.push(recording.englishTranscript.trim() || '_Transcript pending…_');
 
   if (!recording.isEnglish && recording.originalTranscript?.trim()) {
-    lines.push('', `## Original (${recording.languageName})`, '');
+    lines.push(
+      '',
+      '<!-- tapeleaf:original -->',
+      `## Original (${recording.languageName})`,
+      '',
+    );
     lines.push(recording.originalTranscript.trim());
   }
 

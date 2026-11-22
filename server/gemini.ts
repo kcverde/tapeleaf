@@ -4,6 +4,8 @@ import { normalizeTag } from '../src/markdown';
 
 const INLINE_LIMIT_BYTES = 12 * 1024 * 1024; // 12 MB raw (safe under 20 MB request cap after base64)
 const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
+const GENERATE_TIMEOUT_MS = 90_000;
+const FILES_POLL_TIMEOUT_MS = 60_000;
 
 export interface AudioAnalysisResult {
   detectedLanguage: string;
@@ -24,13 +26,18 @@ export function hasGeminiApiKey(): boolean {
   return Boolean(process.env.GEMINI_API_KEY?.trim());
 }
 
+/**
+ * Normalize browser audio MIME types to formats documented by the Gemini Developer API.
+ * Safari captures MP4/AAC containers as audio/mp4; map those to audio/m4a for Gemini while
+ * storage.ts continues serving audio/mp4 to browsers for native <audio> playback.
+ */
 export function normalizeGeminiAudioMime(mimeType: string): string {
   const base = mimeType.split(';')[0]?.trim().toLowerCase() || 'audio/webm';
   switch (base) {
     case 'audio/x-m4a':
     case 'audio/m4a':
     case 'audio/mp4':
-      return 'audio/mp4';
+      return 'audio/m4a';
     case 'audio/mpeg':
     case 'audio/mp3':
       return 'audio/mp3';
@@ -55,7 +62,8 @@ const RESPONSE_SCHEMA = {
   properties: {
     detectedLanguage: {
       type: Type.STRING,
-      description: 'Human-readable name of the primary spoken language in English, e.g. English, Spanish, French, Japanese.',
+      description:
+        'Human-readable name of the primary spoken language in English, e.g. English, Spanish, French, Japanese.',
     },
     languageCode: {
       type: Type.STRING,
@@ -67,11 +75,13 @@ const RESPONSE_SCHEMA = {
     },
     title: {
       type: Type.STRING,
-      description: 'Concrete, scannable English title (3-8 words) capturing the actual topic, never generic like "Voice note".',
+      description:
+        'Concrete, scannable English title (3-8 words) capturing the actual topic, never generic like "Voice note".',
     },
     summary: {
       type: Type.STRING,
-      description: 'Crisp single-sentence English summary (max 24 words) capturing the main takeaway or action.',
+      description:
+        'Crisp single-sentence English summary (max 24 words) capturing the main takeaway or action.',
     },
     tags: {
       type: Type.ARRAY,
@@ -80,11 +90,13 @@ const RESPONSE_SCHEMA = {
     },
     originalTranscript: {
       type: Type.STRING,
-      description: 'Clean, punctuated verbatim transcript in the original spoken language, split into natural paragraphs.',
+      description:
+        'Clean, punctuated verbatim transcript in the original spoken language, split into natural paragraphs.',
     },
     englishTranslation: {
       type: Type.STRING,
-      description: 'Clean, natural English translation of the full transcript (if spoken in English, match originalTranscript cleanly).',
+      description:
+        'Clean, natural English translation of the full transcript (if spoken in English, match originalTranscript cleanly).',
     },
   },
   required: [
@@ -179,7 +191,10 @@ export async function analyzeAudioFile(params: {
     return demoFallback(params.durationSeconds, params.mimeType);
   }
 
-  const ai = new GoogleGenAI({ apiKey });
+  const ai = new GoogleGenAI({
+    apiKey,
+    httpOptions: { timeout: GENERATE_TIMEOUT_MS },
+  });
   const model = getGeminiModel();
   const mimeType = normalizeGeminiAudioMime(params.mimeType);
   const stat = await fsp.stat(params.absPath);
@@ -208,13 +223,15 @@ export async function analyzeAudioFile(params: {
       uploadedFileName = uploaded.name;
 
       let activeFile = uploaded;
-      const deadline = Date.now() + 60_000;
+      const deadline = Date.now() + FILES_POLL_TIMEOUT_MS;
       while (activeFile.state === 'PROCESSING' && Date.now() < deadline && activeFile.name) {
         await new Promise((r) => setTimeout(r, 1500));
         activeFile = await ai.files.get({ name: activeFile.name });
       }
-      if (!activeFile.uri || activeFile.state === 'FAILED') {
-        throw new Error('Gemini Files API failed to prepare the uploaded audio file.');
+      if (!activeFile.uri || activeFile.state !== 'ACTIVE') {
+        throw new Error(
+          `Gemini Files API did not become ACTIVE in time (state: ${activeFile.state ?? 'unknown'}).`,
+        );
       }
 
       mediaPart = {
@@ -237,6 +254,7 @@ export async function analyzeAudioFile(params: {
         responseMimeType: 'application/json',
         responseSchema: RESPONSE_SCHEMA,
         temperature: 0.2,
+        abortSignal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
       },
     });
 
