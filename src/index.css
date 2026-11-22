@@ -1,0 +1,165 @@
+@import "tailwindcss";
+
+:root {
+  --canvas: #FAF9F7;
+  --surface: #FFFFFF;
+  --surface-subtle: #F3F1ED;
+  --surface-hover: #ECE9E3;
+  --border: #E7E5E4;
+  --border-strong: #D6D3D1;
+  --ink: #1C1917;
+  --ink-secondary: #57534E;
+  --ink-muted: #78716C;
+  --vermilion: #E5484D;
+  --vermilion-hover: #D43D42;
+  --vermilion-soft: rgba(229, 72, 77, 0.12);
+  --pill-active-bg: #1C1917;
+  --pill-active-ink: #FAF9F7;
+  --code-bg: #F5F3EF;
+  --shimmer-a: #EFECE6;
+  --shimmer-b: #F8F7F4;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --canvas: #111113;
+  --surface: #1A1A1D;
+  --surface-subtle: #222226;
+  --surface-hover: #2A2A2F;
+  --border: #27272A;
+  --border-strong: #3F3F46;
+  --ink: #F4F4F5;
+  --ink-secondary: #D4D4D8;
+  --ink-muted: #A1A1AA;
+  --vermilion: #E5484D;
+  --vermilion-hover: #EC5C61;
+  --vermilion-soft: rgba(229, 72, 77, 0.18);
+  --pill-active-bg: #F4F4F5;
+  --pill-active-ink: #111113;
+  --code-bg: #151518;
+  --shimmer-a: #222226;
+  --shimmer-b: #2B2B30;
+  color-scheme: dark;
+}
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+    background-color: var(--canvas);
+    color: var(--ink);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  #root {
+    min-height: 100%;
+    height: 100%;
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Hide scrollbars cleanly for horizontal tag pills */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Calm editorial shimmer for processing state */
+@keyframes tapeleaf-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.shimmer-bar {
+  background: linear-gradient(
+    90deg,
+    var(--shimmer-a) 20%,
+    var(--shimmer-b) 50%,
+    var(--shimmer-a) 80%
+  );
+  background-size: 220% 100%;
+  animation: tapeleaf-shimmer 2.1s ease-in-out infinite;
+}
+
+/* Subtle active recording pulse strictly on vermilion */
+@keyframes record-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--vermilion-soft);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(229, 72, 77, 0);
+  }
+}
+
+.record-pulse {
+  animation: record-pulse 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* Crisp custom range scrubber for native audio playback */
+input[type="range"].tapeleaf-scrubber {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"].tapeleaf-scrubber::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 9999px;
+}
+
+input[type="range"].tapeleaf-scrubber::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: var(--ink);
+  border: 2px solid var(--surface);
+  margin-top: -5px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 120ms ease;
+}
+
+input[type="range"].tapeleaf-scrubber:hover::-webkit-slider-thumb {
+  transform: scale(1.12);
+}
+
+input[type="range"].tapeleaf-scrubber::-moz-range-track {
+  height: 4px;
+  border-radius: 9999px;
+  background: var(--border-strong);
+}
+
+input[type="range"].tapeleaf-scrubber::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: var(--ink);
+  border: 2px solid var(--surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.safe-bottom {
+  padding-bottom: max(0.875rem, env(safe-area-inset-bottom));
+}
