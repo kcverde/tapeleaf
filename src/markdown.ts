@@ -1,3 +1,4 @@
+import YAML, { Scalar } from 'yaml';
 import type { Recording } from './types';
 
 export function formatDuration(seconds: number): string {
@@ -19,6 +20,14 @@ export function formatTimerMs(ms: number): string {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${tenths}`;
 }
 
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(kb < 10 ? 1 : 0)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
+}
+
 export function slugifyTitle(title: string): string {
   const normalized = title
     .toLowerCase()
@@ -26,7 +35,7 @@ export function slugifyTitle(title: string): string {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 64);
+    .slice(0, 44);
   return normalized || 'voice-note';
 }
 
@@ -41,46 +50,72 @@ export function normalizeTag(raw: string): string {
     .slice(0, 28);
 }
 
-export function buildNoteFilename(recording: Recording): string {
+/**
+ * Bounded slug + high-entropy ID suffix so new filenames cannot collide even
+ * when two clips are captured in the same second, while preserving any frozen
+ * filename already exported to a specific vault destination.
+ */
+export function buildNoteFilename(recording: Recording, activeVaultId?: string | null): string {
+  if (activeVaultId && recording.vaultExports?.[activeVaultId]?.filename) {
+    return recording.vaultExports[activeVaultId].filename;
+  }
   const datePart = recording.created.slice(0, 10) || new Date().toISOString().slice(0, 10);
-  return `${datePart}-${slugifyTitle(recording.title)}.md`;
+  const parts = recording.id.split('_');
+  const randomSuffix =
+    parts[parts.length - 1]?.toLowerCase().replace(/[^a-z0-9]/g, '') ||
+    recording.id.slice(-8).toLowerCase().replace(/[^a-z0-9]/g, '') ||
+    'note';
+  return `${datePart}-${slugifyTitle(recording.title)}-${randomSuffix}.md`;
 }
 
-function yamlQuote(value: string): string {
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, ' ')}"`;
+function doubleQuoted(value: string): Scalar<string> {
+  const s = new Scalar(value);
+  s.type = Scalar.QUOTE_DOUBLE;
+  return s;
 }
 
 export function buildObsidianMarkdown(recording: Recording): string {
-  const tagsBlock =
-    recording.tags.length > 0
-      ? `tags:\n${recording.tags.map((tag) => `  - ${tag}`).join('\n')}`
-      : 'tags: []';
+  const frontmatter: Record<string, unknown> = {
+    id: recording.id,
+    title: doubleQuoted(recording.title),
+    created: recording.created,
+    duration: doubleQuoted(formatDuration(recording.durationSeconds)),
+    language: recording.language,
+    language_name: recording.languageName,
+    status: recording.status,
+    summary: doubleQuoted(recording.summary),
+    tags: recording.tags,
+    audio: recording.audioPath,
+  };
+
+  if (recording.status === 'failed' && recording.errorMessage) {
+    frontmatter.error = doubleQuoted(recording.errorMessage);
+  }
+
+  const yamlBlock = YAML.stringify(frontmatter, {
+    lineWidth: 0,
+    defaultStringType: 'PLAIN',
+    defaultKeyType: 'PLAIN',
+  }).trimEnd();
+
+  // Shortest-path wikilink resolves from both vault root AND nested subfolders (e.g. MyVault/Tapeleaf/)
+  const embedTarget =
+    recording.audioFilename || recording.audioPath.split('/').pop() || recording.audioPath;
 
   const lines: string[] = [
     '---',
-    `id: ${recording.id}`,
-    `title: ${yamlQuote(recording.title)}`,
-    `created: ${recording.created}`,
-    `duration: ${yamlQuote(formatDuration(recording.durationSeconds))}`,
-    `language: ${recording.language}`,
-    `language_name: ${recording.languageName}`,
-    `status: ${recording.status}`,
-    `summary: ${yamlQuote(recording.summary)}`,
-    tagsBlock,
-    `audio: ${recording.audioPath}`,
+    yamlBlock,
+    '---',
+    '',
+    `# ${recording.title}`,
+    '',
   ];
 
-  if (recording.status === 'failed' && recording.errorMessage) {
-    lines.push(`error: ${yamlQuote(recording.errorMessage)}`);
-  }
-
-  lines.push('---', '', `# ${recording.title}`, '');
-
   if (recording.summary.trim()) {
-    lines.push(`> ${recording.summary.trim()}`, '');
+    lines.push(`> ${recording.summary.trim().replace(/\r?\n+/g, ' ')}`, '');
   }
 
-  lines.push(`![[${recording.audioPath}]]`, '');
+  lines.push(`![[${embedTarget}]]`, '');
   lines.push('## Transcript', '');
   lines.push(recording.englishTranscript.trim() || '_Transcript pending…_');
 

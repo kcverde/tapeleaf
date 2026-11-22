@@ -7,7 +7,8 @@ import {
   Download,
   FileAudio,
   FileText,
-  Lock,
+  FolderCheck,
+  FolderOpen,
   Moon,
   Pause,
   Pencil,
@@ -17,47 +18,82 @@ import {
   RotateCcw,
   RotateCw,
   Search,
+  Settings,
+  Share2,
   Square,
   Sun,
   Trash2,
   Upload,
+  WifiOff,
   X,
 } from 'lucide-react';
+import { SettingsModal } from './components/SettingsModal';
 import { extensionForMimeType, useRecorder } from './hooks/useRecorder';
+import {
+  applyGeminiResult,
+  deleteRecordingLocal,
+  generateRecordingId,
+  getAudioRecord,
+  getRecording,
+  isQuotaError,
+  listRecordings,
+  markRecordingStatus,
+  recoverAbandonedJobs,
+  requestPersistentStorage,
+  saveRecordingAtomic,
+  updateRecordingUserEdits,
+  updateRecordingVaultExport,
+  withQueueLock,
+} from './lib/db';
+import {
+  GeminiClientError,
+  analyzeAudioBlob,
+  loadGeminiSettings,
+  saveGeminiSettings,
+} from './lib/geminiClient';
+import { registerServiceWorker } from './lib/swRegistration';
+import type { SwUpdateHandle } from './lib/swRegistration';
+import {
+  deleteRecordingFromVault,
+  disconnectVaultFolder,
+  getVaultExportFor,
+  loadVaultConnection,
+  needsVaultWrite,
+  pickVaultFolder,
+  queryVaultPermission,
+  requestVaultPermission,
+  writeRecordingToVault,
+} from './lib/vaultSync';
+import type { VaultPermissionState } from './lib/vaultSync';
 import {
   buildNoteFilename,
   buildObsidianMarkdown,
+  formatBytes,
   formatDuration,
   formatFullTimestamp,
   formatRelativeTime,
   formatTimerMs,
   normalizeTag,
 } from './markdown';
-import type { CapturedAudio, Recording } from './types';
+import type { CapturedAudio, Recording, StoredVaultHandle } from './types';
 
 type DetailTab = 'english' | 'original' | 'markdown';
 type ThemeMode = 'light' | 'dark';
 
-interface PendingUpload {
-  clientUploadId: string;
+interface UnsavedCapture {
+  id: string;
   captured: CapturedAudio;
   error: string;
 }
 
 const PLAYBACK_RATES = [1, 1.25, 1.5, 2] as const;
+const OBSIDIAN_STANDARD_LIMIT_BYTES = 5 * 1024 * 1024; // 5 MB
 
 function getInitialTheme(): ThemeMode {
   if (typeof window === 'undefined') return 'light';
   const stored = window.localStorage.getItem('tapeleaf-theme');
   if (stored === 'light' || stored === 'dark') return stored;
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-}
-
-function createClientUploadId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID().replace(/-/g, '');
-  }
-  return `up_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function triggerDownload(blob: Blob, filename: string) {
@@ -97,8 +133,8 @@ function TapeleafMark() {
 function formatCodecLabel(mimeType: string): string {
   if (!mimeType) return 'AUDIO';
   const lower = mimeType.toLowerCase();
+  if (lower.includes('mp4') || lower.includes('m4a') || lower.includes('aac')) return 'AAC · M4A';
   if (lower.includes('opus') && lower.includes('webm')) return 'OPUS · WEBM';
-  if (lower.includes('mp4') || lower.includes('m4a')) return 'AAC · M4A';
   if (lower.includes('ogg')) return 'OPUS · OGG';
   if (lower.includes('webm')) return 'WEBM';
   return 'AUDIO';
@@ -129,6 +165,7 @@ function getSeekableEnd(el: HTMLAudioElement): number {
 
 function AudioPlayer({ recording }: { recording: Recording }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [mediaDuration, setMediaDuration] = useState(0);
@@ -136,26 +173,36 @@ function AudioPlayer({ recording }: { recording: Recording }) {
   const [rateIndex, setRateIndex] = useState(0);
 
   const playbackRate = PLAYBACK_RATES[rateIndex];
-  const src = recording.audioUrl || `/api/recordings/${encodeURIComponent(recording.id)}/audio`;
 
   useEffect(() => {
+    let active = true;
+    let createdUrl: string | null = null;
+
+    setObjectUrl(null);
     setIsPlaying(false);
     setCurrentTime(0);
     setMediaDuration(0);
     setSeekableEnd(0);
-    const el = audioRef.current;
-    if (el) {
-      el.pause();
-      el.currentTime = 0;
-      el.playbackRate = PLAYBACK_RATES[rateIndex];
-    }
-  }, [recording.id, src]);
+
+    void getAudioRecord(recording.id).then((rec) => {
+      if (!active || !rec) return;
+      createdUrl = URL.createObjectURL(rec.blob);
+      setObjectUrl(createdUrl);
+    });
+
+    return () => {
+      active = false;
+      if (createdUrl) {
+        URL.revokeObjectURL(createdUrl);
+      }
+    };
+  }, [recording.id]);
 
   useEffect(() => {
     if (audioRef.current) {
       audioRef.current.playbackRate = playbackRate;
     }
-  }, [playbackRate]);
+  }, [playbackRate, objectUrl]);
 
   const syncMetrics = (el: HTMLAudioElement) => {
     if (Number.isFinite(el.duration) && el.duration > 0) {
@@ -167,7 +214,7 @@ function AudioPlayer({ recording }: { recording: Recording }) {
 
   const togglePlay = async () => {
     const el = audioRef.current;
-    if (!el) return;
+    if (!el || !objectUrl) return;
     if (el.paused) {
       try {
         await el.play();
@@ -186,7 +233,7 @@ function AudioPlayer({ recording }: { recording: Recording }) {
         ? mediaDuration
         : recording.durationSeconds;
 
-  const canSeek = seekableEnd > 0 || mediaDuration > 0;
+  const canSeek = Boolean(objectUrl) && (seekableEnd > 0 || mediaDuration > 0);
 
   const seekTo = (nextSeconds: number) => {
     const el = audioRef.current;
@@ -199,7 +246,7 @@ function AudioPlayer({ recording }: { recording: Recording }) {
       el.currentTime = clamped;
       setCurrentTime(clamped);
     } catch {
-      // ignore if media element is not seekable yet
+      // ignore if browser cannot seek yet
     }
   };
 
@@ -216,7 +263,7 @@ function AudioPlayer({ recording }: { recording: Recording }) {
     <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-subtle)]/75 px-3.5 py-3 sm:px-4 sm:py-3.5">
       <audio
         ref={audioRef}
-        src={src}
+        src={objectUrl ?? undefined}
         preload="metadata"
         onLoadedMetadata={(e) => syncMetrics(e.currentTarget)}
         onDurationChange={(e) => syncMetrics(e.currentTarget)}
@@ -237,8 +284,9 @@ function AudioPlayer({ recording }: { recording: Recording }) {
         <button
           type="button"
           onClick={() => void togglePlay()}
+          disabled={!objectUrl}
           aria-label={isPlaying ? 'Pause audio' : 'Play audio'}
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--ink)] text-[var(--canvas)] transition-transform hover:opacity-90 active:scale-[0.97] cursor-pointer"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--ink)] text-[var(--canvas)] transition-transform hover:opacity-90 active:scale-[0.97] disabled:opacity-40 cursor-pointer"
         >
           {isPlaying ? (
             <Pause className="h-4 w-4 fill-current" />
@@ -425,18 +473,9 @@ function MarkdownPreview({
 
 export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
-  const [authState, setAuthState] = useState<'checking' | 'locked' | 'unlocked'>('checking');
-  const [passcodeEnabled, setPasscodeEnabled] = useState(false);
-  const [passcodeInput, setPasscodeInput] = useState('');
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [unlocking, setUnlocking] = useState(false);
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [loadingLibrary, setLoadingLibrary] = useState(true);
-  const [libraryError, setLibraryError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string>('');
-  const [serverMarkdownCache, setServerMarkdownCache] = useState<
-    Record<string, { filename: string; markdown: string }>
-  >({});
   const [mobileView, setMobileView] = useState<'list' | 'detail'>('list');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
@@ -447,9 +486,25 @@ export default function App() {
   const [addingTag, setAddingTag] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const [uploadingCount, setUploadingCount] = useState(0);
-  const [savedToast, setSavedToast] = useState(false);
-  const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
+  const [deleteAlsoFromVault, setDeleteAlsoFromVault] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const [isOnline, setIsOnline] = useState(() =>
+    typeof navigator === 'undefined' ? true : navigator.onLine,
+  );
+  const [geminiSettings, setGeminiSettings] = useState(loadGeminiSettings);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [queuePausedReason, setQueuePausedReason] = useState<string | null>(null);
+
+  const [vault, setVault] = useState<StoredVaultHandle | null>(null);
+  const [vaultPermission, setVaultPermission] = useState<VaultPermissionState>('disconnected');
+  const [vaultBannerError, setVaultBannerError] = useState<string | null>(null);
+
+  const [savingCount, setSavingCount] = useState(0);
+  const [savedToast, setSavedToast] = useState<string | null>(null);
+  const [unsavedCaptures, setUnsavedCaptures] = useState<UnsavedCapture[]>([]);
+  const [pendingSwUpdate, setPendingSwUpdate] = useState<SwUpdateHandle | null>(null);
+  const [pendingSwReload, setPendingSwReload] = useState(false);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
@@ -457,97 +512,28 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const savedTimerRef = useRef<number | null>(null);
 
-  const handleUnauthorized = useCallback(() => {
-    setPasscodeEnabled(true);
-    setAuthState('locked');
-    setAuthError('Your session expired. Unlock to continue.');
-  }, []);
+  const geminiSettingsRef = useRef(geminiSettings);
+  geminiSettingsRef.current = geminiSettings;
+  const queuePausedRef = useRef(queuePausedReason);
+  queuePausedRef.current = queuePausedReason;
+  const vaultRef = useRef(vault);
+  vaultRef.current = vault;
+  const vaultPermRef = useRef(vaultPermission);
+  vaultPermRef.current = vaultPermission;
 
-  const showSavedConfirmation = useCallback(() => {
-    setSavedToast(true);
-    if (savedTimerRef.current) window.clearTimeout(savedTimerRef.current);
-    savedTimerRef.current = window.setTimeout(() => setSavedToast(false), 2600);
-  }, []);
-
-  const uploadCapturedAudio = useCallback(
-    async (captured: CapturedAudio, existingUploadId?: string) => {
-      const clientUploadId = existingUploadId || createClientUploadId();
-      setUploadingCount((c) => c + 1);
-
-      try {
-        const form = new FormData();
-        const filename = `recording.${captured.extension}`;
-        form.append('audio', captured.blob, filename);
-        form.append('durationSeconds', String(captured.durationSeconds));
-        form.append('mimeType', captured.mimeType);
-        form.append('clientUploadId', clientUploadId);
-
-        const res = await fetch('/api/recordings', {
-          method: 'POST',
-          body: form,
-        });
-
-        if (res.status === 401) {
-          setPendingUploads((prev) => {
-            const rest = prev.filter((item) => item.clientUploadId !== clientUploadId);
-            return [
-              {
-                clientUploadId,
-                captured,
-                error: 'Session locked — unlock to retry uploading this clip.',
-              },
-              ...rest,
-            ];
-          });
-          handleUnauthorized();
-          return;
-        }
-
-        if (!res.ok) {
-          const payload = (await res.json().catch(() => ({}))) as { error?: string };
-          throw new Error(payload.error || `Upload failed (${res.status})`);
-        }
-
-        const data = (await res.json()) as { recording: Recording };
-        // Remove only this confirmed upload; preserve any other pending clips
-        setPendingUploads((prev) =>
-          prev.filter((item) => item.clientUploadId !== clientUploadId),
-        );
-        setRecordings((prev) => [
-          data.recording,
-          ...prev.filter((r) => r.id !== data.recording.id),
-        ]);
-        setSelectedId(data.recording.id);
-        setSelectedTag(null);
-        setSearchQuery('');
-        setDetailTab('english');
-        setMobileView('detail');
-        showSavedConfirmation();
-      } catch (err) {
-        const message =
-          err instanceof Error
-            ? err.message
-            : 'Could not upload audio. Your recording is still safe in this tab.';
-        setPendingUploads((prev) => {
-          const rest = prev.filter((item) => item.clientUploadId !== clientUploadId);
-          return [{ clientUploadId, captured, error: message }, ...rest];
-        });
-      } finally {
-        setUploadingCount((c) => Math.max(0, c - 1));
-      }
-    },
-    [handleUnauthorized, showSavedConfirmation],
-  );
-
-  const recorder = useRecorder({
-    onInterruptedCapture: (captured) => {
-      void uploadCapturedAudio(captured);
-    },
-  });
+  const drainActiveRef = useRef(false);
+  const drainAgainRef = useRef(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => {
+    registerServiceWorker({
+      onUpdateReady: (handle) => setPendingSwUpdate(handle),
+      onControllerUpdated: () => setPendingSwReload(true),
+    });
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -555,139 +541,303 @@ export default function App() {
     };
   }, []);
 
-  const fetchRecordings = useCallback(
-    async (silent = false) => {
-      if (!silent) setLibraryError(null);
-      try {
-        const res = await fetch('/api/recordings', { cache: 'no-store' });
-        if (res.status === 401) {
-          handleUnauthorized();
-          setRecordings([]);
-          return;
-        }
-        if (!res.ok) {
-          throw new Error(`Server returned ${res.status}`);
-        }
-        const data = (await res.json()) as { recordings: Recording[] };
-        setRecordings(data.recordings);
-        setSelectedId((prev) => {
-          if (prev && data.recordings.some((r) => r.id === prev)) return prev;
-          return data.recordings[0]?.id ?? '';
+  const flashToast = useCallback((label: string) => {
+    setSavedToast(label);
+    if (savedTimerRef.current) window.clearTimeout(savedTimerRef.current);
+    savedTimerRef.current = window.setTimeout(() => setSavedToast(null), 2600);
+  }, []);
+
+  const refreshLibrary = useCallback(async () => {
+    const list = await listRecordings();
+    setRecordings(list);
+    setSelectedId((prev) => {
+      if (prev && list.some((r) => r.id === prev)) return prev;
+      return list[0]?.id ?? '';
+    });
+    return list;
+  }, []);
+
+  const recheckVaultPermission = useCallback(async (): Promise<VaultPermissionState> => {
+    const current = vaultRef.current;
+    if (!current) return vaultPermRef.current;
+    const perm = await queryVaultPermission(current.handle);
+    const next: VaultPermissionState = perm === 'granted' ? 'granted' : 'prompt';
+    setVaultPermission(next);
+    vaultPermRef.current = next;
+    return next;
+  }, []);
+
+  const syncSingleToVault = useCallback(
+    async (
+      id: string,
+      options?: { forceOverwrite?: boolean; vaultOverride?: StoredVaultHandle | null },
+    ) => {
+      const activeVault = options?.vaultOverride ?? vaultRef.current;
+      const perm = options?.vaultOverride ? 'granted' : vaultPermRef.current;
+      if (!activeVault || perm !== 'granted') return null;
+
+      return withQueueLock(`vault:${id}`, async () => {
+        const rec = await getRecording(id);
+        if (!rec) return null;
+        const audio = await getAudioRecord(id);
+        const outcome = await writeRecordingToVault({
+          vault: activeVault,
+          recording: rec,
+          audioBlob: audio?.blob ?? null,
+          forceOverwrite: options?.forceOverwrite,
+          onReserveFilename: async (reserved) => {
+            const saved = await updateRecordingVaultExport(id, reserved);
+            if (saved) {
+              setRecordings((prev) => prev.map((r) => (r.id === id ? saved : r)));
+            }
+          },
         });
-        setLibraryError(null);
-      } catch {
-        if (!silent) {
-          setLibraryError('Could not reach Tapeleaf server.');
+
+        if (outcome.permissionLost) {
+          setVaultPermission('prompt');
+          vaultPermRef.current = 'prompt';
+          setVaultBannerError('Folder access expired. Tap Reconnect to resume writing.');
         }
-      } finally {
-        setLoadingLibrary(false);
-      }
+
+        const updated = await updateRecordingVaultExport(id, outcome.vaultState);
+        if (updated) {
+          setRecordings((prev) => prev.map((r) => (r.id === id ? updated : r)));
+        }
+        return outcome;
+      });
     },
-    [handleUnauthorized],
+    [],
   );
 
-  // Check auth status on boot, then load library
+  const flushVaultWrites = useCallback(
+    async (vaultOverride?: StoredVaultHandle | null): Promise<{
+      written: number;
+      failed: number;
+      permissionLost: boolean;
+    }> => {
+      const activeVault = vaultOverride ?? vaultRef.current;
+      if (!activeVault) return { written: 0, failed: 0, permissionLost: false };
+
+      if (!vaultOverride) {
+        const currentPerm = await recheckVaultPermission();
+        if (currentPerm !== 'granted') {
+          return { written: 0, failed: 0, permissionLost: true };
+        }
+      }
+
+      let written = 0;
+      let failed = 0;
+      let permissionLost = false;
+      const current = await listRecordings();
+      for (const rec of current) {
+        if (!needsVaultWrite(rec, activeVault.vaultId)) continue;
+        const outcome = await syncSingleToVault(rec.id, { vaultOverride: activeVault });
+        if (!outcome) continue;
+        if (outcome.permissionLost) {
+          permissionLost = true;
+          failed += 1;
+          break;
+        }
+        if (outcome.vaultState.state === 'written') written += 1;
+        else if (outcome.vaultState.state === 'error') failed += 1;
+      }
+      return { written, failed, permissionLost };
+    },
+    [recheckVaultPermission, syncSingleToVault],
+  );
+
+  const drainTranscriptionQueue = useCallback(async () => {
+    if (!navigator.onLine) return;
+    if (drainActiveRef.current) {
+      drainAgainRef.current = true;
+      return;
+    }
+
+    drainActiveRef.current = true;
+    try {
+      do {
+        drainAgainRef.current = false;
+        await withQueueLock('processing', async () => {
+          // Re-read credentials & pause state AFTER acquiring lock
+          if (!navigator.onLine || queuePausedRef.current) return;
+          const initialKey = geminiSettingsRef.current.apiKey.trim();
+          if (!initialKey) return;
+
+          const list = await listRecordings();
+          const queued = list
+            .filter((r) => r.status === 'queued')
+            .sort((a, b) => Date.parse(a.created) - Date.parse(b.created));
+
+          if (queued.length === 0) return;
+
+          const tagCounts = new Map<string, number>();
+          for (const r of list) {
+            for (const t of r.tags) {
+              tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1);
+            }
+          }
+          const existingTags = [...tagCounts.entries()]
+            .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+            .slice(0, 15)
+            .map(([t]) => t);
+
+          for (const item of queued) {
+            // Re-read latest settings & pause state before EVERY job so key clears/changes apply immediately
+            if (!navigator.onLine || queuePausedRef.current) break;
+            const { apiKey, model } = geminiSettingsRef.current;
+            if (!apiKey.trim()) break;
+
+            const latest = await getRecording(item.id);
+            if (!latest || latest.status !== 'queued') continue;
+
+            const audio = await getAudioRecord(item.id);
+            if (!audio) {
+              await markRecordingStatus(item.id, 'failed', 'Local audio blob is missing.');
+              await refreshLibrary();
+              continue;
+            }
+
+            const marked = await markRecordingStatus(item.id, 'processing');
+            if (!marked) continue;
+            setRecordings((prev) => prev.map((r) => (r.id === item.id ? marked : r)));
+
+            try {
+              const analysis = await analyzeAudioBlob({
+                apiKey,
+                model,
+                blob: audio.blob,
+                mimeType: audio.mimeType || latest.audioMimeType,
+                existingTags,
+              });
+
+              setQueuePausedReason(null);
+              queuePausedRef.current = null;
+              const updated = await applyGeminiResult(item.id, {
+                title: analysis.title,
+                summary: analysis.summary,
+                tags: analysis.tags,
+                language: analysis.languageCode,
+                languageName: analysis.detectedLanguage,
+                isEnglish: analysis.isEnglish,
+                englishTranscript: analysis.englishTranslation,
+                originalTranscript: analysis.isEnglish
+                  ? undefined
+                  : analysis.originalTranscript,
+              });
+
+              if (updated) {
+                setRecordings((prev) => prev.map((r) => (r.id === item.id ? updated : r)));
+                void syncSingleToVault(item.id);
+              }
+            } catch (err) {
+              const gErr =
+                err instanceof GeminiClientError
+                  ? err
+                  : new GeminiClientError(
+                      'other',
+                      err instanceof Error ? err.message : 'Transcription failed.',
+                    );
+
+              if (gErr.kind === 'network') {
+                const requeued = await markRecordingStatus(item.id, 'queued');
+                if (requeued) {
+                  setRecordings((prev) => prev.map((r) => (r.id === item.id ? requeued : r)));
+                }
+                break;
+              }
+
+              const failed = await markRecordingStatus(item.id, 'failed', gErr.message);
+              if (failed) {
+                setRecordings((prev) => prev.map((r) => (r.id === item.id ? failed : r)));
+                void syncSingleToVault(item.id);
+              }
+
+              if (gErr.kind === 'auth' || gErr.kind === 'quota') {
+                setQueuePausedReason(gErr.message);
+                queuePausedRef.current = gErr.message;
+                break;
+              }
+            }
+          }
+        });
+      } while (drainAgainRef.current);
+    } finally {
+      drainActiveRef.current = false;
+    }
+  }, [refreshLibrary, syncSingleToVault]);
+
+  // Initial boot: paint library immediately without waiting on processing lock,
+  // then run non-blocking abandoned-job recovery & queue drains.
   useEffect(() => {
     let active = true;
-    const init = async () => {
+    const boot = async () => {
       try {
-        const res = await fetch('/api/auth/status', { cache: 'no-store' });
-        if (!res.ok) throw new Error('Auth check failed');
-        const data = (await res.json()) as {
-          passcodeEnabled: boolean;
-          authenticated: boolean;
-        };
+        const [initialList, vaultConn] = await Promise.all([
+          listRecordings(),
+          loadVaultConnection(),
+        ]);
         if (!active) return;
-        setPasscodeEnabled(data.passcodeEnabled);
-        if (data.passcodeEnabled && !data.authenticated) {
-          setAuthState('locked');
-          setLoadingLibrary(false);
-          return;
-        }
-        setAuthState('unlocked');
-        await fetchRecordings(false);
-      } catch {
-        if (!active) return;
-        setAuthState('unlocked');
-        await fetchRecordings(false);
+
+        setRecordings(initialList);
+        setSelectedId((prev) => {
+          if (prev && initialList.some((r) => r.id === prev)) return prev;
+          return initialList[0]?.id ?? '';
+        });
+
+        setVault(vaultConn.stored);
+        setVaultPermission(vaultConn.permission);
+        vaultRef.current = vaultConn.stored;
+        vaultPermRef.current = vaultConn.permission;
+      } finally {
+        if (active) setLoadingLibrary(false);
       }
+
+      // Recover abandoned processing jobs asynchronously under the processing lock
+      void recoverAbandonedJobs(navigator.onLine).then((recovered) => {
+        if (!active) return;
+        setRecordings(recovered);
+        if (vaultRef.current && vaultPermRef.current === 'granted') {
+          void flushVaultWrites(vaultRef.current);
+        }
+        void drainTranscriptionQueue();
+      });
     };
-    void init();
+    void boot();
     return () => {
       active = false;
     };
-  }, [fetchRecordings]);
+  }, [drainTranscriptionQueue, flushVaultWrites]);
 
-  const handleUnlock = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!passcodeInput.trim() || unlocking) return;
-    setUnlocking(true);
-    setAuthError(null);
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ passcode: passcodeInput }),
-      });
-      if (!res.ok) {
-        const payload = (await res.json().catch(() => ({}))) as { error?: string };
-        setAuthError(payload.error || 'Incorrect passcode.');
-        return;
-      }
-      setPasscodeInput('');
-      setAuthState('unlocked');
-      setLoadingLibrary(true);
-      await fetchRecordings(false);
-    } catch {
-      setAuthError('Could not reach Tapeleaf server.');
-    } finally {
-      setUnlocking(false);
-    }
-  };
-
-  const handleLock = async () => {
-    try {
-      await fetch('/api/auth/logout', { method: 'POST' });
-    } catch {
-      // ignore
-    }
-    setRecordings([]);
-    setSelectedId('');
-    setServerMarkdownCache({});
-    setAuthError(null);
-    setAuthState('locked');
-  };
-
-  // Refresh on window focus / visibility for phone ↔ desktop sync
+  // Foreground-driven permission recheck + queue drain
   useEffect(() => {
-    if (authState !== 'unlocked') return;
-    const onFocus = () => void fetchRecordings(true);
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        void fetchRecordings(true);
-      }
+    const onOnline = () => {
+      setIsOnline(true);
+      void drainTranscriptionQueue();
     };
-    window.addEventListener('focus', onFocus);
+    const onOffline = () => setIsOnline(false);
+    const onResume = () => {
+      void Promise.all([refreshLibrary(), recheckVaultPermission()]).then(([, perm]) => {
+        void drainTranscriptionQueue();
+        if (perm === 'granted') {
+          void flushVaultWrites();
+        }
+      });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') onResume();
+    };
+
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    window.addEventListener('focus', onResume);
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
-      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+      window.removeEventListener('focus', onResume);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [authState, fetchRecordings]);
-
-  // Poll gently while any clip is processing
-  const hasProcessing = useMemo(
-    () => authState === 'unlocked' && recordings.some((r) => r.status === 'processing'),
-    [authState, recordings],
-  );
-
-  useEffect(() => {
-    if (!hasProcessing) return;
-    const interval = window.setInterval(() => {
-      void fetchRecordings(true);
-    }, 1500);
-    return () => window.clearInterval(interval);
-  }, [hasProcessing, fetchRecordings]);
+  }, [drainTranscriptionQueue, flushVaultWrites, recheckVaultPermission, refreshLibrary]);
 
   // Keyboard shortcut: `/` focuses search
   useEffect(() => {
@@ -705,6 +855,260 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
+
+  const persistCapturedAudio = useCallback(
+    async (captured: CapturedAudio, existingUnsavedId?: string) => {
+      setSavingCount((c) => c + 1);
+      const id = generateRecordingId();
+      const audioFilename = `${id}.${captured.extension}`;
+      const audioPath = `audio/${audioFilename}`;
+
+      const stub: Recording = {
+        id,
+        title: 'Voice note',
+        created: new Date().toISOString(),
+        durationSeconds: Math.max(0, Math.round(captured.durationSeconds)),
+        language: 'en',
+        languageName: 'English',
+        isEnglish: true,
+        status: 'queued',
+        summary: '',
+        tags: [],
+        audioPath,
+        audioFilename,
+        audioMimeType: captured.mimeType || 'audio/mp4',
+        audioSizeBytes: captured.blob.size,
+        englishTranscript: '',
+        revision: 1,
+      };
+
+      try {
+        await saveRecordingAtomic(stub, {
+          id,
+          blob: captured.blob,
+          mimeType: stub.audioMimeType,
+          sizeBytes: captured.blob.size,
+        });
+
+        void requestPersistentStorage();
+
+        if (existingUnsavedId) {
+          setUnsavedCaptures((prev) => prev.filter((u) => u.id !== existingUnsavedId));
+        }
+
+        setRecordings((prev) => [stub, ...prev.filter((r) => r.id !== id)]);
+        setSelectedId(id);
+        setSelectedTag(null);
+        setSearchQuery('');
+        setDetailTab('english');
+        setMobileView('detail');
+        flashToast('Saved');
+
+        if (vaultRef.current && vaultPermRef.current === 'granted') {
+          void syncSingleToVault(id);
+        }
+
+        void drainTranscriptionQueue();
+      } catch (err) {
+        const message = isQuotaError(err)
+          ? 'Device storage is full. Download this audio clip now or free up space and retry.'
+          : err instanceof Error
+            ? err.message
+            : 'Could not save audio to local storage.';
+        const unsavedId = existingUnsavedId || `unsaved_${Date.now()}`;
+        setUnsavedCaptures((prev) => [
+          { id: unsavedId, captured, error: message },
+          ...prev.filter((u) => u.id !== unsavedId),
+        ]);
+      } finally {
+        setSavingCount((c) => Math.max(0, c - 1));
+      }
+    },
+    [drainTranscriptionQueue, flashToast, syncSingleToVault],
+  );
+
+  const recorder = useRecorder({
+    onInterruptedCapture: (captured) => {
+      void persistCapturedAudio(captured);
+    },
+  });
+
+  // Only allow SW updates or controllerchange reloads when capture & persistence are completely safe
+  const isSafeForReload =
+    recorder.status === 'idle' && savingCount === 0 && unsavedCaptures.length === 0;
+
+  useEffect(() => {
+    if (pendingSwReload && isSafeForReload) {
+      window.location.reload();
+    }
+  }, [pendingSwReload, isSafeForReload]);
+
+  const handleStopRecording = async () => {
+    const captured = await recorder.stopRecording();
+    if (captured) {
+      await persistCapturedAudio(captured);
+    }
+  };
+
+  const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    const durationSeconds = await readAudioDuration(file);
+    const mimeType = file.type || 'audio/mp4';
+    await persistCapturedAudio({
+      blob: file,
+      mimeType,
+      durationSeconds,
+      extension: extensionForMimeType(mimeType, file.name),
+    });
+  };
+
+  const handleConnectVault = async () => {
+    setVaultBannerError(null);
+    const { stored } = await pickVaultFolder(vaultRef.current);
+    setVault(stored);
+    setVaultPermission('granted');
+    vaultRef.current = stored;
+    vaultPermRef.current = 'granted';
+    const summary = await flushVaultWrites(stored);
+    if (summary.permissionLost) {
+      throw new Error('Folder permission was lost while writing notes.');
+    }
+    if (summary.failed > 0) {
+      throw new Error(`Connected, but ${summary.failed} note(s) failed to write.`);
+    }
+    flashToast('Vault connected');
+  };
+
+  const handleReconnectVault = async () => {
+    setVaultBannerError(null);
+    const current = vaultRef.current;
+    if (!current) {
+      await handleConnectVault();
+      return;
+    }
+    const perm = await requestVaultPermission(current.handle);
+    if (perm !== 'granted') {
+      const msg =
+        'Permission was not granted for the saved folder. Choose the folder again to reconnect.';
+      setVaultBannerError(msg);
+      throw new Error(msg);
+    }
+
+    setVaultPermission('granted');
+    vaultPermRef.current = 'granted';
+    const summary = await flushVaultWrites(current);
+    if (summary.permissionLost) {
+      const msg = 'Folder permission was revoked during sync. Choose the folder again.';
+      setVaultBannerError(msg);
+      throw new Error(msg);
+    }
+    if (summary.failed > 0) {
+      const msg = `Reconnected, but ${summary.failed} note(s) could not be written.`;
+      setVaultBannerError(msg);
+      throw new Error(msg);
+    }
+    flashToast(summary.written > 0 ? 'Written to vault' : 'Vault reconnected');
+  };
+
+  const handleDisconnectVault = async () => {
+    await disconnectVaultFolder();
+    setVault(null);
+    setVaultPermission('disconnected');
+    vaultRef.current = null;
+    vaultPermRef.current = 'disconnected';
+    setVaultBannerError(null);
+  };
+
+  const handleSyncVaultNow = async () => {
+    const summary = await flushVaultWrites();
+    if (summary.permissionLost) {
+      throw new Error('Folder access needs reconnection.');
+    }
+    if (summary.failed > 0) {
+      throw new Error(`${summary.failed} note(s) could not be written to the vault.`);
+    }
+  };
+
+  const handleSaveGeminiSettings = (next: {
+    apiKey: string;
+    rememberOnDevice: boolean;
+    model: string;
+  }) => {
+    saveGeminiSettings(next);
+    setGeminiSettings(next);
+    geminiSettingsRef.current = next;
+    setQueuePausedReason(null);
+    queuePausedRef.current = null;
+    if (next.apiKey.trim()) {
+      void drainTranscriptionQueue();
+    }
+  };
+
+  const handleReprocess = async (recording: Recording) => {
+    if (recording.status === 'processing') return;
+    if (!geminiSettings.apiKey.trim()) {
+      setSettingsOpen(true);
+      return;
+    }
+    setQueuePausedReason(null);
+    queuePausedRef.current = null;
+    const queued = await markRecordingStatus(recording.id, 'queued');
+    if (queued) {
+      setRecordings((prev) => prev.map((r) => (r.id === recording.id ? queued : r)));
+      void drainTranscriptionQueue();
+    }
+  };
+
+  const handleDelete = async (recording: Recording, alsoVault: boolean) => {
+    setDeleteError(null);
+
+    // Serialize deletion against concurrent vault exports using the exact same lock
+    const result = await withQueueLock(`vault:${recording.id}`, async () => {
+      const latestRec = (await getRecording(recording.id)) ?? recording;
+      if (alsoVault) {
+        const activeVault = vaultRef.current;
+        if (!activeVault) {
+          return { ok: false as const, error: 'No vault folder is currently connected.' };
+        }
+        const perm = await recheckVaultPermission();
+        if (perm !== 'granted') {
+          return {
+            ok: false as const,
+            error: 'Reconnect the vault folder first to delete vault files.',
+          };
+        }
+        const delRes = await deleteRecordingFromVault(activeVault, latestRec);
+        if (!delRes.ok) {
+          if (delRes.permissionLost) {
+            setVaultPermission('prompt');
+            vaultPermRef.current = 'prompt';
+          }
+          return { ok: false as const, error: delRes.error };
+        }
+      }
+
+      await deleteRecordingLocal(recording.id);
+      return { ok: true as const };
+    });
+
+    if (!result.ok) {
+      setDeleteError(result.error);
+      return;
+    }
+
+    setConfirmDeleteId(null);
+    setDeleteAlsoFromVault(false);
+    setRecordings((prev) => {
+      const next = prev.filter((r) => r.id !== recording.id);
+      if (selectedId === recording.id) {
+        setSelectedId(next[0]?.id ?? '');
+        setMobileView('list');
+      }
+      return next;
+    });
+  };
 
   const toggleTheme = () => {
     setTheme((prev) => {
@@ -754,40 +1158,10 @@ export default function App() {
     );
   }, [recordings, selectedId, filteredRecordings]);
 
-  // Keep Preview / Copy MD in exact sync with the stored Markdown on disk
-  const selectedFingerprint = selectedRecording
-    ? `${selectedRecording.id}:${selectedRecording.status}:${selectedRecording.title}:${selectedRecording.tags.join(',')}:${selectedRecording.filename ?? ''}`
-    : '';
-
-  useEffect(() => {
-    if (authState !== 'unlocked' || !selectedRecording) return;
-    let active = true;
-    const id = selectedRecording.id;
-    const loadStoredMarkdown = async () => {
-      try {
-        const res = await fetch(`/api/recordings/${encodeURIComponent(id)}`, {
-          cache: 'no-store',
-        });
-        if (res.status === 401) {
-          handleUnauthorized();
-          return;
-        }
-        if (!res.ok) return;
-        const data = (await res.json()) as { filename: string; markdown: string };
-        if (!active) return;
-        setServerMarkdownCache((prev) => ({
-          ...prev,
-          [id]: { filename: data.filename, markdown: data.markdown },
-        }));
-      } catch {
-        // fallback to client serializer
-      }
-    };
-    void loadStoredMarkdown();
-    return () => {
-      active = false;
-    };
-  }, [authState, selectedFingerprint, handleUnauthorized]);
+  const pendingVaultCount = useMemo(() => {
+    if (!vault) return 0;
+    return recordings.filter((r) => needsVaultWrite(r, vault.vaultId)).length;
+  }, [recordings, vault]);
 
   useEffect(() => {
     if (selectedRecording?.isEnglish && detailTab === 'original') {
@@ -800,6 +1174,8 @@ export default function App() {
     setAddingTag(false);
     setTagDraft('');
     setConfirmDeleteId(null);
+    setDeleteAlsoFromVault(false);
+    setDeleteError(null);
   }, [selectedRecording?.id]);
 
   useEffect(() => {
@@ -815,184 +1191,64 @@ export default function App() {
     }
   }, [addingTag]);
 
-  const handleSelectRecording = (id: string) => {
-    setSelectedId(id);
-    setMobileView('detail');
-  };
-
-  const handleStopRecording = async () => {
-    const captured = await recorder.stopRecording();
-    if (captured) {
-      await uploadCapturedAudio(captured);
-    }
-  };
-
-  const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-    const durationSeconds = await readAudioDuration(file);
-    const mimeType = file.type || 'audio/webm';
-    await uploadCapturedAudio({
-      blob: file,
-      mimeType,
-      durationSeconds,
-      extension: extensionForMimeType(mimeType),
-    });
-  };
-
-  const handleDownloadPendingAudio = (item: PendingUpload) => {
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    triggerDownload(
-      item.captured.blob,
-      `tapeleaf-unsaved-${stamp}.${item.captured.extension}`,
-    );
-  };
-
-  const handleReprocess = async (recording: Recording) => {
-    if (recording.status === 'processing') return;
-    setRecordings((prev) =>
-      prev.map((r) =>
-        r.id === recording.id ? { ...r, status: 'processing', errorMessage: undefined } : r,
-      ),
-    );
-    try {
-      const res = await fetch(`/api/recordings/${encodeURIComponent(recording.id)}/reprocess`, {
-        method: 'POST',
-      });
-      if (res.status === 401) {
-        handleUnauthorized();
-        return;
-      }
-      if (!res.ok) throw new Error('Reprocess failed');
-      const data = (await res.json()) as { recording: Recording };
-      setRecordings((prev) => prev.map((r) => (r.id === recording.id ? data.recording : r)));
-    } catch {
-      void fetchRecordings(true);
-    }
-  };
-
-  const handleDelete = async (id: string) => {
-    setConfirmDeleteId(null);
-    const previous = recordings;
-    const next = recordings.filter((r) => r.id !== id);
-    setRecordings(next);
-    if (selectedId === id) {
-      setSelectedId(next[0]?.id ?? '');
-      setMobileView('list');
-    }
-
-    try {
-      const res = await fetch(`/api/recordings/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-      });
-      if (res.status === 401) {
-        setRecordings(previous);
-        handleUnauthorized();
-        return;
-      }
-      if (!res.ok) {
-        setRecordings(previous);
-      }
-    } catch {
-      setRecordings(previous);
-    }
-  };
-
-  const persistPatch = async (id: string, patch: { title?: string; tags?: string[] }) => {
-    try {
-      const res = await fetch(`/api/recordings/${encodeURIComponent(id)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
-      if (res.status === 401) {
-        handleUnauthorized();
-        return;
-      }
-      if (!res.ok) {
-        void fetchRecordings(true);
-        return;
-      }
-      const data = (await res.json()) as {
-        recording: Recording;
-        filename: string;
-        markdown: string;
-      };
-      setRecordings((prev) => prev.map((r) => (r.id === id ? data.recording : r)));
-      if (data.markdown) {
-        setServerMarkdownCache((prev) => ({
-          ...prev,
-          [id]: { filename: data.filename, markdown: data.markdown },
-        }));
-      }
-    } catch {
-      void fetchRecordings(true);
-    }
-  };
-
   const startEditingTitle = () => {
     if (!selectedRecording || selectedRecording.status === 'processing') return;
     setTitleDraft(selectedRecording.title);
     setEditingTitle(true);
   };
 
-  const commitTitleEdit = () => {
+  const commitTitleEdit = async () => {
     if (!selectedRecording) return;
     const trimmed = titleDraft.trim();
     setEditingTitle(false);
     if (trimmed && trimmed !== selectedRecording.title) {
-      setRecordings((prev) =>
-        prev.map((r) => (r.id === selectedRecording.id ? { ...r, title: trimmed } : r)),
-      );
-      void persistPatch(selectedRecording.id, { title: trimmed });
+      const updated = await updateRecordingUserEdits(selectedRecording.id, { title: trimmed });
+      if (updated) {
+        setRecordings((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+        void syncSingleToVault(updated.id);
+      }
     }
   };
 
-  const handleAddTag = () => {
+  const handleAddTag = async () => {
     if (!selectedRecording) return;
     const clean = normalizeTag(tagDraft);
     setTagDraft('');
     setAddingTag(false);
     if (clean && !selectedRecording.tags.includes(clean)) {
       const nextTags = [...selectedRecording.tags, clean];
-      setRecordings((prev) =>
-        prev.map((r) => (r.id === selectedRecording.id ? { ...r, tags: nextTags } : r)),
-      );
-      void persistPatch(selectedRecording.id, { tags: nextTags });
+      const updated = await updateRecordingUserEdits(selectedRecording.id, { tags: nextTags });
+      if (updated) {
+        setRecordings((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+        void syncSingleToVault(updated.id);
+      }
     }
   };
 
-  const handleRemoveTag = (recording: Recording, tagToRemove: string) => {
+  const handleRemoveTag = async (recording: Recording, tagToRemove: string) => {
     const nextTags = recording.tags.filter((t) => t !== tagToRemove);
-    setRecordings((prev) =>
-      prev.map((r) => (r.id === recording.id ? { ...r, tags: nextTags } : r)),
-    );
+    const updated = await updateRecordingUserEdits(recording.id, { tags: nextTags });
+    if (updated) {
+      setRecordings((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+      void syncSingleToVault(updated.id);
+    }
     if (selectedTag === tagToRemove) {
       const stillExists = recordings.some(
         (r) => r.id !== recording.id && r.tags.includes(tagToRemove),
       );
       if (!stillExists) setSelectedTag(null);
     }
-    void persistPatch(recording.id, { tags: nextTags });
   };
 
-  const selectedMarkdown = useMemo(() => {
-    if (!selectedRecording) return '';
-    return (
-      serverMarkdownCache[selectedRecording.id]?.markdown ??
-      buildObsidianMarkdown(selectedRecording)
-    );
-  }, [selectedRecording, serverMarkdownCache]);
+  const selectedMarkdown = useMemo(
+    () => (selectedRecording ? buildObsidianMarkdown(selectedRecording) : ''),
+    [selectedRecording],
+  );
 
-  const selectedFilename = useMemo(() => {
-    if (!selectedRecording) return 'note.md';
-    return (
-      serverMarkdownCache[selectedRecording.id]?.filename ??
-      selectedRecording.filename ??
-      buildNoteFilename(selectedRecording)
-    );
-  }, [selectedRecording, serverMarkdownCache]);
+  const selectedFilename = useMemo(
+    () => (selectedRecording ? buildNoteFilename(selectedRecording, vault?.vaultId) : 'note.md'),
+    [selectedRecording, vault?.vaultId],
+  );
 
   const handleCopyMarkdown = async () => {
     if (!selectedRecording) return;
@@ -1020,97 +1276,72 @@ export default function App() {
 
   const handleDownloadMarkdown = () => {
     if (!selectedRecording) return;
-    const a = document.createElement('a');
-    a.href = `/api/recordings/${encodeURIComponent(selectedRecording.id)}/markdown`;
-    a.download = selectedFilename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    const blob = new Blob([selectedMarkdown], { type: 'text/markdown;charset=utf-8' });
+    triggerDownload(blob, selectedFilename);
   };
 
-  const handleDownloadAudio = () => {
+  const handleDownloadAudio = async () => {
     if (!selectedRecording) return;
-    const a = document.createElement('a');
-    a.href = `/api/recordings/${encodeURIComponent(selectedRecording.id)}/audio?download=1`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    const audio = await getAudioRecord(selectedRecording.id);
+    if (!audio) return;
+    const ext = selectedRecording.audioFilename.split('.').pop() || 'm4a';
+    const baseName = selectedFilename.replace(/\.md$/, '');
+    triggerDownload(audio.blob, `${baseName}.${ext}`);
   };
 
-  const uploading = uploadingCount > 0;
+  const handleShareAudio = async () => {
+    if (!selectedRecording || typeof navigator.share !== 'function') return;
+    const audio = await getAudioRecord(selectedRecording.id);
+    if (!audio) return;
+    const file = new File([audio.blob], selectedRecording.audioFilename, {
+      type: audio.mimeType || selectedRecording.audioMimeType,
+    });
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          title: selectedRecording.title,
+          text: selectedRecording.summary || selectedRecording.title,
+          files: [file],
+        });
+      } else {
+        await navigator.share({
+          title: selectedRecording.title,
+          text: selectedMarkdown,
+        });
+      }
+    } catch {
+      // User dismissed share sheet
+    }
+  };
+
+  const handleKeepObsidianVersion = async (recording: Recording) => {
+    const activeExport = getVaultExportFor(recording, vault?.vaultId);
+    if (!activeExport) return;
+    const updated = await updateRecordingVaultExport(recording.id, {
+      ...activeExport,
+      state: 'written',
+      lastExportedRevision: recording.revision,
+      error: undefined,
+    });
+    if (updated) {
+      setRecordings((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+    }
+  };
+
+  const canUseShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+  const saving = savingCount > 0;
   const isActiveRecording = recorder.status === 'recording' || recorder.status === 'paused';
+  const canApplySwUpdate = Boolean(pendingSwUpdate) && isSafeForReload;
 
-  if (authState === 'checking') {
-    return (
-      <div className="h-dvh w-full bg-[var(--canvas)] text-[var(--ink)] flex items-center justify-center">
-        <div className="flex items-center gap-2.5 text-[13.5px] text-[var(--ink-muted)]">
-          <TapeleafMark />
-          <span>Tapeleaf</span>
-        </div>
-      </div>
-    );
-  }
+  const selectedVaultExport = selectedRecording
+    ? getVaultExportFor(selectedRecording, vault?.vaultId)
+    : undefined;
 
-  if (authState === 'locked') {
-    return (
-      <div className="h-dvh w-full bg-[var(--canvas)] text-[var(--ink)] flex flex-col items-center justify-center px-5">
-        <div className="w-full max-w-[360px] rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-6 sm:p-7 shadow-[0_4px_24px_rgba(0,0,0,0.04)]">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <TapeleafMark />
-              <h1 className="text-[16px] font-semibold tracking-[-0.02em] text-[var(--ink)]">
-                Tapeleaf
-              </h1>
-            </div>
-            <button
-              type="button"
-              onClick={toggleTheme}
-              aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
-            >
-              {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </button>
-          </div>
-
-          <p className="mt-5 text-[14px] text-[var(--ink-secondary)]">
-            Enter your passcode to unlock your voice notes.
-          </p>
-
-          {pendingUploads.length > 0 && (
-            <p className="mt-2.5 rounded-xl bg-[var(--surface-subtle)] px-3 py-2 text-[12px] text-[var(--ink-secondary)]">
-              {pendingUploads.length}{' '}
-              {pendingUploads.length === 1 ? 'unsaved recording is' : 'unsaved recordings are'}{' '}
-              preserved in this tab and ready to upload after unlocking.
-            </p>
-          )}
-
-          <form onSubmit={(e) => void handleUnlock(e)} className="mt-4 space-y-3">
-            <input
-              type="password"
-              value={passcodeInput}
-              onChange={(e) => setPasscodeInput(e.target.value)}
-              placeholder="Passcode"
-              autoComplete="current-password"
-              autoFocus
-              aria-label="Passcode"
-              className="h-11 w-full rounded-xl border border-[var(--border)] bg-[var(--canvas)] px-3.5 text-[14px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--border-strong)] focus:outline-none"
-            />
-            {authError && (
-              <p className="text-[12.5px] text-[var(--vermilion)]">{authError}</p>
-            )}
-            <button
-              type="submit"
-              disabled={unlocking || !passcodeInput.trim()}
-              className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[var(--ink)] text-[14px] font-medium text-[var(--canvas)] hover:opacity-90 disabled:opacity-45 transition-opacity cursor-pointer"
-            >
-              <Lock className="h-3.5 w-3.5" />
-              {unlocking ? 'Unlocking…' : 'Unlock'}
-            </button>
-          </form>
-        </div>
-      </div>
-    );
-  }
+  const isSelectedWrittenToActiveVault =
+    Boolean(vault) &&
+    selectedVaultExport?.state === 'written' &&
+    selectedVaultExport.audioWritten &&
+    selectedVaultExport.lastExportedRevision >= (selectedRecording?.revision ?? 0);
 
   return (
     <div className="h-dvh w-full overflow-hidden bg-[var(--canvas)] text-[var(--ink)] flex flex-col lg:flex-row">
@@ -1137,22 +1368,36 @@ export default function App() {
 
           <div className="flex items-center gap-1">
             {savedToast && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--surface-subtle)] px-2.5 py-1 text-[11.5px] font-medium text-[var(--ink-secondary)]">
+              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--surface-subtle)] px-2.5 py-1 text-[12px] font-medium text-[var(--ink-secondary)]">
                 <Check className="h-3 w-3" />
-                Saved
+                {savedToast}
               </span>
             )}
-            {passcodeEnabled && (
-              <button
-                type="button"
-                onClick={() => void handleLock()}
-                aria-label="Lock Tapeleaf"
-                title="Lock Tapeleaf"
-                className="flex h-10 w-10 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+            {!isOnline && (
+              <span
+                title="Offline — clips save locally and transcribe when back online"
+                className="inline-flex items-center gap-1 rounded-full bg-[var(--surface-subtle)] px-2.5 py-1 text-[12px] font-medium text-[var(--ink-muted)]"
               >
-                <Lock className="h-[16px] w-[16px]" />
-              </button>
+                <WifiOff className="h-3 w-3" />
+                Offline
+              </span>
             )}
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              aria-label="Open settings"
+              title="Settings (Gemini key & Obsidian folder)"
+              className="relative flex h-10 w-10 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+            >
+              <Settings className="h-[18px] w-[18px]" />
+              {(!geminiSettings.apiKey.trim() ||
+                (vault && vaultPermission === 'prompt')) && (
+                <span
+                  aria-hidden="true"
+                  className="absolute top-2 right-2 h-2 w-2 rounded-full bg-[var(--vermilion)]"
+                />
+              )}
+            </button>
             <button
               type="button"
               onClick={toggleTheme}
@@ -1168,6 +1413,72 @@ export default function App() {
             </button>
           </div>
         </header>
+
+        {/* Quiet Contextual Banners */}
+        <div className="px-4 sm:px-5 space-y-2 shrink-0">
+          {canApplySwUpdate && (
+            <div className="mb-2 flex items-center justify-between gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-[12.5px]">
+              <span className="text-[var(--ink-secondary)]">New version ready</span>
+              <button
+                type="button"
+                onClick={() => pendingSwUpdate?.applyUpdate()}
+                className="rounded-lg bg-[var(--ink)] px-2.5 py-1 text-[12px] font-medium text-[var(--canvas)] cursor-pointer"
+              >
+                Update
+              </button>
+            </div>
+          )}
+
+          {vault && vaultPermission === 'prompt' && (
+            <div className="mb-2 rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] px-3.5 py-2.5 text-[13px] space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="font-medium text-[var(--ink)] truncate">
+                    Reconnect {vault.folderName}
+                  </p>
+                  <p className="text-[12px] text-[var(--ink-muted)]">
+                    {pendingVaultCount > 0
+                      ? `${pendingVaultCount} ${pendingVaultCount === 1 ? 'note' : 'notes'} waiting to write`
+                      : 'Tap once to resume writing .md & audio'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleReconnectVault().catch(() => {})}
+                  className="shrink-0 inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-3 text-[12.5px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
+                >
+                  <FolderOpen className="h-3.5 w-3.5" />
+                  Reconnect
+                </button>
+              </div>
+              {vaultBannerError && (
+                <div className="flex items-center justify-between gap-2 pt-1 text-[12px] text-[var(--vermilion)]">
+                  <span>{vaultBannerError}</span>
+                  <button
+                    type="button"
+                    onClick={() => void handleConnectVault().catch(() => {})}
+                    className="shrink-0 underline font-medium cursor-pointer"
+                  >
+                    Choose folder
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {queuePausedReason && (
+            <div className="mb-2 rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] px-3.5 py-2.5 text-[12.5px] flex items-center justify-between gap-2">
+              <span className="text-[var(--vermilion)] leading-snug">{queuePausedReason}</span>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(true)}
+                className="shrink-0 rounded-lg border border-[var(--border)] px-2.5 py-1 text-[12px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] cursor-pointer"
+              >
+                Settings
+              </button>
+            </div>
+          )}
+        </div>
 
         {/* Search Bar + Tag Filter Pills */}
         <div className="px-4 sm:px-5 pb-3 shrink-0 space-y-2.5">
@@ -1198,7 +1509,6 @@ export default function App() {
             )}
           </div>
 
-          {/* Horizontal Scrollable Tag Pills */}
           {allTags.length > 0 && (
             <div
               className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5"
@@ -1241,19 +1551,7 @@ export default function App() {
 
         {/* Scannable Library Card Feed */}
         <div className="flex-1 overflow-y-auto px-4 sm:px-5 pb-4 space-y-2">
-          {libraryError ? (
-            <div className="rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] px-4 py-6 text-center">
-              <p className="text-[13.5px] font-medium text-[var(--ink)]">{libraryError}</p>
-              <button
-                type="button"
-                onClick={() => void fetchRecordings(false)}
-                className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-subtle)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer"
-              >
-                <RefreshCw className="h-3.5 w-3.5" />
-                Retry
-              </button>
-            </div>
-          ) : loadingLibrary ? (
+          {loadingLibrary ? (
             <div className="space-y-2">
               {[0, 1, 2].map((i) => (
                 <div
@@ -1267,21 +1565,45 @@ export default function App() {
               ))}
             </div>
           ) : filteredRecordings.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-[var(--border-strong)] px-5 py-10 text-center">
+            <div className="rounded-2xl border border-dashed border-[var(--border-strong)] px-5 py-9 text-center space-y-2.5">
               {recordings.length === 0 ? (
                 <>
-                  <p className="text-[14px] font-medium text-[var(--ink)]">No voice notes yet</p>
-                  <p className="mt-1 text-[13px] leading-relaxed text-[var(--ink-muted)]">
-                    Tap Record below or upload an audio clip. Each note is saved directly as
-                    Obsidian-ready Markdown.
+                  <p className="text-[15px] font-medium text-[var(--ink)]">No voice notes yet</p>
+                  <p className="text-[13.5px] leading-relaxed text-[var(--ink-muted)]">
+                    Tap <strong>Record</strong> below. Notes save locally on your phone and write
+                    straight to your Obsidian vault folder.
                   </p>
+                  <div className="pt-1 flex flex-wrap items-center justify-center gap-2">
+                    {!geminiSettings.apiKey.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => setSettingsOpen(true)}
+                        className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-3.5 text-[13px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
+                      >
+                        <Settings className="h-3.5 w-3.5" />
+                        Set up Gemini &amp; Vault
+                      </button>
+                    )}
+                    {geminiSettings.apiKey.trim() &&
+                      !vault &&
+                      vaultPermission !== 'unsupported' && (
+                        <button
+                          type="button"
+                          onClick={() => void handleConnectVault().catch(() => {})}
+                          className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] cursor-pointer"
+                        >
+                          <FolderOpen className="h-3.5 w-3.5" />
+                          Connect Obsidian folder
+                        </button>
+                      )}
+                  </div>
                 </>
               ) : (
                 <>
-                  <p className="text-[14px] font-medium text-[var(--ink)]">
+                  <p className="text-[14.5px] font-medium text-[var(--ink)]">
                     No matching voice notes
                   </p>
-                  <p className="mt-1 text-[13px] text-[var(--ink-muted)]">
+                  <p className="text-[13.5px] text-[var(--ink-muted)]">
                     Try clearing your search or choosing another tag.
                   </p>
                   <button
@@ -1290,7 +1612,7 @@ export default function App() {
                       setSearchQuery('');
                       setSelectedTag(null);
                     }}
-                    className="mt-3 inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] cursor-pointer"
+                    className="inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] cursor-pointer"
                   >
                     Reset filters
                   </button>
@@ -1301,12 +1623,24 @@ export default function App() {
             filteredRecordings.map((rec) => {
               const isSelected = selectedRecording?.id === rec.id;
               const isProcessing = rec.status === 'processing';
+              const isQueued = rec.status === 'queued';
               const isFailed = rec.status === 'failed';
+              const recVaultExport = getVaultExportFor(rec, vault?.vaultId);
+              const writtenToVault =
+                Boolean(vault) &&
+                recVaultExport?.state === 'written' &&
+                recVaultExport.audioWritten &&
+                recVaultExport.lastExportedRevision >= rec.revision;
+              const hasConflict = Boolean(vault) && recVaultExport?.state === 'conflict';
+
               return (
                 <button
                   key={rec.id}
                   type="button"
-                  onClick={() => handleSelectRecording(rec.id)}
+                  onClick={() => {
+                    setSelectedId(rec.id);
+                    setMobileView('detail');
+                  }}
                   className={[
                     'group relative w-full text-left rounded-2xl border p-3.5 transition-all cursor-pointer',
                     isSelected
@@ -1348,7 +1682,15 @@ export default function App() {
                         </span>
                       </div>
 
-                      {isFailed ? (
+                      {isQueued ? (
+                        <p className="mt-1.5 text-[13.5px] text-[var(--ink-muted)]">
+                          {!geminiSettings.apiKey.trim()
+                            ? 'Audio saved · add Gemini key in Settings to transcribe'
+                            : !isOnline
+                              ? 'Saved offline · will transcribe when back online'
+                              : 'Queued for transcription…'}
+                        </p>
+                      ) : isFailed ? (
                         <p className="mt-1.5 inline-flex items-center gap-1.5 text-[13.5px] text-[var(--vermilion)]">
                           <AlertCircle className="h-3.5 w-3.5 shrink-0" />
                           Audio saved · tap to retry transcription
@@ -1366,9 +1708,25 @@ export default function App() {
                           {formatDuration(rec.durationSeconds)}
                         </span>
 
-                        {!rec.isEnglish && !isFailed && (
+                        {!rec.isEnglish && rec.status === 'ready' && (
                           <span className="rounded-md bg-[var(--surface-subtle)] px-2 py-0.5 font-mono text-[11px] font-medium tracking-wide text-[var(--ink-secondary)]">
                             {rec.language.toUpperCase()} → EN
+                          </span>
+                        )}
+
+                        {writtenToVault && (
+                          <span
+                            title="Written to Obsidian vault folder"
+                            className="inline-flex items-center gap-1 text-[11.5px] text-[var(--ink-muted)]"
+                          >
+                            <FolderCheck className="h-3 w-3" />
+                            Vault
+                          </span>
+                        )}
+
+                        {hasConflict && (
+                          <span className="text-[11.5px] font-medium text-[var(--vermilion)]">
+                            Edited in Obsidian
                           </span>
                         )}
 
@@ -1386,15 +1744,14 @@ export default function App() {
           )}
         </div>
 
-        {/* Bottom Record Dock (Mobile Thumb-Zone + Desktop Left Rail) */}
+        {/* Bottom Record Dock */}
         <div className="shrink-0 border-t border-[var(--border)] bg-[var(--canvas)]/95 backdrop-blur-md px-4 sm:px-5 pt-3 safe-bottom">
-          {/* Unsaved Upload Recovery Stack */}
-          {pendingUploads.length > 0 && (
+          {unsavedCaptures.length > 0 && (
             <div className="mb-3 space-y-2 max-h-48 overflow-y-auto">
-              {pendingUploads.map((item) => (
+              {unsavedCaptures.map((item) => (
                 <div
-                  key={item.clientUploadId}
-                  className="rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] p-3 text-[12.5px]"
+                  key={item.id}
+                  className="rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] p-3 text-[13px]"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-start gap-2">
@@ -1403,20 +1760,15 @@ export default function App() {
                         <p className="font-medium text-[var(--ink)]">
                           Unsaved clip ({formatDuration(item.captured.durationSeconds)})
                         </p>
-                        <p className="mt-0.5 text-[11.5px] text-[var(--ink-muted)]">
-                          {item.error}
-                        </p>
+                        <p className="mt-0.5 text-[12px] text-[var(--ink-muted)]">{item.error}</p>
                       </div>
                     </div>
                     <button
                       type="button"
                       onClick={() =>
-                        setPendingUploads((prev) =>
-                          prev.filter((p) => p.clientUploadId !== item.clientUploadId),
-                        )
+                        setUnsavedCaptures((prev) => prev.filter((p) => p.id !== item.id))
                       }
-                      aria-label="Discard unsaved recording"
-                      title="Discard unsaved recording"
+                      aria-label="Discard unsaved clip"
                       className="shrink-0 rounded p-0.5 text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer"
                     >
                       <X className="h-3.5 w-3.5" />
@@ -1425,19 +1777,23 @@ export default function App() {
                   <div className="mt-2.5 flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() =>
-                        void uploadCapturedAudio(item.captured, item.clientUploadId)
-                      }
-                      disabled={uploading}
-                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-3 text-[12px] font-medium text-[var(--canvas)] hover:opacity-90 disabled:opacity-50 cursor-pointer"
+                      onClick={() => void persistCapturedAudio(item.captured, item.id)}
+                      disabled={saving}
+                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-3 text-[12.5px] font-medium text-[var(--canvas)] hover:opacity-90 disabled:opacity-50 cursor-pointer"
                     >
                       <RefreshCw className="h-3.5 w-3.5" />
-                      Retry upload
+                      Retry save
                     </button>
                     <button
                       type="button"
-                      onClick={() => handleDownloadPendingAudio(item)}
-                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] px-3 text-[12px] font-medium text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer"
+                      onClick={() => {
+                        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                        triggerDownload(
+                          item.captured.blob,
+                          `tapeleaf-unsaved-${stamp}.${item.captured.extension}`,
+                        );
+                      }}
+                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] px-3 text-[12.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer"
                     >
                       <Download className="h-3.5 w-3.5" />
                       Download Audio
@@ -1449,7 +1805,7 @@ export default function App() {
           )}
 
           {recorder.error && (
-            <div className="mb-3 rounded-xl border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-2.5 text-[12px] text-[var(--ink-secondary)]">
+            <div className="mb-3 rounded-xl border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-2.5 text-[12.5px] text-[var(--ink-secondary)]">
               <div className="flex items-start justify-between gap-2">
                 <p className="leading-snug">{recorder.error}</p>
                 <button
@@ -1484,13 +1840,13 @@ export default function App() {
                         : 'bg-[var(--ink-muted)]',
                     ].join(' ')}
                   />
-                  <span className="font-mono text-[11px] font-medium uppercase tracking-wider text-[var(--ink-muted)]">
+                  <span className="font-mono text-[11.5px] font-medium uppercase tracking-wider text-[var(--ink-muted)]">
                     {recorder.status === 'recording' ? 'Recording' : 'Paused'}
                   </span>
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <span className="font-mono text-[15px] font-medium tabular-nums text-[var(--ink)]">
+                  <span className="font-mono text-[16px] font-medium tabular-nums text-[var(--ink)]">
                     {formatTimerMs(recorder.elapsedMs)}
                   </span>
                   <button
@@ -1505,7 +1861,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Live Mic Level Bars */}
               <div
                 className="my-3 flex h-8 items-center justify-between gap-[3px] px-0.5"
                 aria-hidden="true"
@@ -1528,7 +1883,6 @@ export default function App() {
                 })}
               </div>
 
-              {/* Pause/Resume & Stop */}
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
@@ -1537,7 +1891,7 @@ export default function App() {
                       ? recorder.pauseRecording
                       : recorder.resumeRecording
                   }
-                  className="flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] px-3 text-[13.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
+                  className="flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] px-3 text-[14px] font-medium text-[var(--ink)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
                 >
                   {recorder.status === 'recording' ? (
                     <>
@@ -1555,7 +1909,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => void handleStopRecording()}
-                  className="flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-[var(--vermilion)] px-3 text-[13.5px] font-medium text-white hover:bg-[var(--vermilion-hover)] transition-colors cursor-pointer"
+                  className="flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-[var(--vermilion)] px-3 text-[14px] font-medium text-white hover:bg-[var(--vermilion-hover)] transition-colors cursor-pointer"
                 >
                   <Square className="h-3.5 w-3.5 fill-current" />
                   Stop &amp; Save
@@ -1566,14 +1920,17 @@ export default function App() {
             <div className="flex items-center justify-between gap-2.5">
               <div className="min-w-0">
                 <p className="text-[13.5px] font-medium text-[var(--ink)]">
-                  {uploading
+                  {saving
                     ? 'Saving audio…'
                     : recorder.status === 'requesting'
                       ? 'Requesting mic…'
                       : 'Ready to record'}
                 </p>
                 <p className="font-mono text-[11.5px] tracking-wide text-[var(--ink-muted)] truncate">
-                  {formatCodecLabel(recorder.supportedMimeType)} · Obsidian .md
+                  {formatCodecLabel(recorder.supportedMimeType)}
+                  {vault && vaultPermission === 'granted'
+                    ? ` · ${vault.folderName}`
+                    : ' · On-device'}
                 </p>
               </div>
 
@@ -1581,9 +1938,9 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading || recorder.status === 'requesting'}
-                  title="Upload audio file"
-                  aria-label="Upload audio file"
+                  disabled={saving || recorder.status === 'requesting'}
+                  title="Import audio file"
+                  aria-label="Import audio file"
                   className="flex h-11 w-11 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--ink-muted)] hover:border-[var(--border-strong)] hover:text-[var(--ink)] transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   <Upload className="h-4 w-4" />
@@ -1592,7 +1949,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => void recorder.startRecording()}
-                  disabled={uploading || recorder.status === 'requesting'}
+                  disabled={saving || recorder.status === 'requesting'}
                   aria-label="Start recording"
                   className="group relative flex h-[52px] items-center gap-2.5 rounded-full bg-[var(--vermilion)] pl-4 pr-5 text-white shadow-[0_2px_10px_rgba(229,72,77,0.28)] hover:bg-[var(--vermilion-hover)] active:scale-[0.98] transition-all disabled:opacity-60 cursor-pointer shrink-0"
                 >
@@ -1623,7 +1980,7 @@ export default function App() {
                   type="button"
                   onClick={() => setMobileView('list')}
                   aria-label="Back to library"
-                  className="lg:hidden flex h-11 items-center gap-1 rounded-xl pl-1.5 pr-2.5 text-[13.5px] font-medium text-[var(--ink-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer shrink-0"
+                  className="lg:hidden flex h-11 items-center gap-1 rounded-xl pl-1.5 pr-2.5 text-[14px] font-medium text-[var(--ink-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer shrink-0"
                 >
                   <ArrowLeft className="h-4 w-4" />
                   Notes
@@ -1642,21 +1999,33 @@ export default function App() {
 
               <div className="flex items-center gap-1.5 shrink-0">
                 {confirmDeleteId === selectedRecording.id ? (
-                  <div className="flex items-center gap-1.5 rounded-xl border border-[var(--border-strong)] bg-[var(--surface-subtle)] px-2 py-1">
-                    <span className="px-1.5 text-[12px] text-[var(--ink-secondary)]">
-                      Delete note?
-                    </span>
+                  <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--border-strong)] bg-[var(--surface-subtle)] px-2.5 py-1.5">
+                    {vault && vaultPermission === 'granted' && Boolean(selectedVaultExport) && (
+                      <label className="inline-flex items-center gap-1.5 text-[12px] text-[var(--ink-secondary)] cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={deleteAlsoFromVault}
+                          onChange={(e) => setDeleteAlsoFromVault(e.target.checked)}
+                          className="h-3.5 w-3.5 accent-[var(--vermilion)] cursor-pointer"
+                        />
+                        Also delete from vault
+                      </label>
+                    )}
                     <button
                       type="button"
-                      onClick={() => setConfirmDeleteId(null)}
-                      className="rounded-lg px-2.5 py-1 text-[12px] font-medium text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)] cursor-pointer"
+                      onClick={() => {
+                        setConfirmDeleteId(null);
+                        setDeleteAlsoFromVault(false);
+                        setDeleteError(null);
+                      }}
+                      className="rounded-lg px-2.5 py-1 text-[12.5px] font-medium text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)] cursor-pointer"
                     >
                       Cancel
                     </button>
                     <button
                       type="button"
-                      onClick={() => void handleDelete(selectedRecording.id)}
-                      className="rounded-lg bg-[var(--vermilion)] px-2.5 py-1 text-[12px] font-medium text-white hover:bg-[var(--vermilion-hover)] cursor-pointer"
+                      onClick={() => void handleDelete(selectedRecording, deleteAlsoFromVault)}
+                      className="rounded-lg bg-[var(--vermilion)] px-2.5 py-1 text-[12.5px] font-medium text-white hover:bg-[var(--vermilion-hover)] cursor-pointer"
                     >
                       Delete
                     </button>
@@ -1666,7 +2035,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => void handleCopyMarkdown()}
-                      className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 text-[13.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] transition-colors cursor-pointer"
+                      className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-2.5 sm:px-3 text-[13.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] transition-colors cursor-pointer"
                     >
                       {copiedId === selectedRecording.id ? (
                         <>
@@ -1685,17 +2054,27 @@ export default function App() {
                       type="button"
                       onClick={handleDownloadMarkdown}
                       title={`Download ${selectedFilename}`}
-                      className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 text-[13.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] transition-colors cursor-pointer"
+                      className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-2.5 sm:px-3 text-[13.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] transition-colors cursor-pointer"
                     >
                       <Download className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
                       <span className="hidden sm:inline">.md</span>
                     </button>
 
-                    <div className="mx-0.5 hidden sm:block h-5 w-px bg-[var(--border)]" />
+                    {canUseShare && (
+                      <button
+                        type="button"
+                        onClick={() => void handleShareAudio()}
+                        title="Share audio (Google Drive / Files)"
+                        aria-label="Share audio"
+                        className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+                      >
+                        <Share2 className="h-4 w-4" />
+                      </button>
+                    )}
 
                     <button
                       type="button"
-                      onClick={handleDownloadAudio}
+                      onClick={() => void handleDownloadAudio()}
                       title="Download audio"
                       aria-label="Download audio"
                       className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
@@ -1707,8 +2086,8 @@ export default function App() {
                       type="button"
                       onClick={() => void handleReprocess(selectedRecording)}
                       disabled={selectedRecording.status === 'processing'}
-                      title="Reprocess note"
-                      aria-label="Reprocess note"
+                      title="Reprocess with Gemini"
+                      aria-label="Reprocess with Gemini"
                       className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors disabled:opacity-40 cursor-pointer"
                     >
                       <RefreshCw
@@ -1721,7 +2100,10 @@ export default function App() {
 
                     <button
                       type="button"
-                      onClick={() => setConfirmDeleteId(selectedRecording.id)}
+                      onClick={() => {
+                        setDeleteError(null);
+                        setConfirmDeleteId(selectedRecording.id);
+                      }}
                       title="Delete note"
                       aria-label="Delete note"
                       className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--vermilion)] transition-colors cursor-pointer"
@@ -1736,11 +2118,25 @@ export default function App() {
             {/* Detail Scrollable Reading Surface */}
             <div className="flex-1 overflow-y-auto">
               <article className="mx-auto max-w-[680px] px-5 sm:px-8 py-6 sm:py-9 space-y-6">
+                {deleteError && (
+                  <div className="rounded-2xl border border-[var(--border-strong)] bg-[var(--canvas)] px-4 py-3 text-[13px] text-[var(--vermilion)] flex items-center justify-between gap-2">
+                    <span>{deleteError}</span>
+                    <button
+                      type="button"
+                      onClick={() => setDeleteError(null)}
+                      aria-label="Dismiss delete error"
+                      className="shrink-0 p-0.5 text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                )}
+
                 {/* Mobile Timestamp & Language Meta */}
-                <div className="flex flex-wrap items-center gap-2 sm:hidden text-[12px] text-[var(--ink-muted)]">
+                <div className="flex flex-wrap items-center gap-2 sm:hidden text-[12.5px] text-[var(--ink-muted)]">
                   <span>{formatFullTimestamp(selectedRecording.created)}</span>
                   {!selectedRecording.isEnglish && selectedRecording.status === 'ready' && (
-                    <span className="rounded-md bg-[var(--surface-subtle)] px-2 py-0.5 text-[11px] font-medium text-[var(--ink-secondary)]">
+                    <span className="rounded-md bg-[var(--surface-subtle)] px-2 py-0.5 text-[11.5px] font-medium text-[var(--ink-secondary)]">
                       {selectedRecording.languageName} → English
                     </span>
                   )}
@@ -1754,9 +2150,9 @@ export default function App() {
                       type="text"
                       value={titleDraft}
                       onChange={(e) => setTitleDraft(e.target.value)}
-                      onBlur={commitTitleEdit}
+                      onBlur={() => void commitTitleEdit()}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter') commitTitleEdit();
+                        if (e.key === 'Enter') void commitTitleEdit();
                         if (e.key === 'Escape') setEditingTitle(false);
                       }}
                       aria-label="Edit note title"
@@ -1798,7 +2194,7 @@ export default function App() {
                           <span>#{tag}</span>
                           <button
                             type="button"
-                            onClick={() => handleRemoveTag(selectedRecording, tag)}
+                            onClick={() => void handleRemoveTag(selectedRecording, tag)}
                             aria-label={`Remove tag ${tag}`}
                             className="flex h-4 w-4 items-center justify-center rounded-full text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] cursor-pointer"
                           >
@@ -1813,11 +2209,11 @@ export default function App() {
                           type="text"
                           value={tagDraft}
                           onChange={(e) => setTagDraft(e.target.value)}
-                          onBlur={handleAddTag}
+                          onBlur={() => void handleAddTag()}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') {
                               e.preventDefault();
-                              handleAddTag();
+                              void handleAddTag();
                             }
                             if (e.key === 'Escape') {
                               setTagDraft('');
@@ -1845,15 +2241,142 @@ export default function App() {
                 {/* Clean Native Audio Playback Deck */}
                 <AudioPlayer recording={selectedRecording} />
 
-                {/* Failed Processing Banner */}
+                {/* Vault Write Status & Conflict Handling */}
+                {vault && selectedVaultExport?.state === 'conflict' ? (
+                  <div className="rounded-2xl border border-[var(--border-strong)] bg-[var(--canvas)] p-4 space-y-3">
+                    <div className="space-y-1">
+                      <p className="inline-flex items-center gap-2 text-[14px] font-medium text-[var(--ink)]">
+                        <AlertCircle className="h-4 w-4 text-[var(--vermilion)]" />
+                        Modified in Obsidian
+                      </p>
+                      <p className="text-[13px] text-[var(--ink-muted)]">
+                        {selectedVaultExport.error}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void syncSingleToVault(selectedRecording.id, { forceOverwrite: true })
+                        }
+                        className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-3.5 text-[13px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
+                      >
+                        Overwrite vault note
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleKeepObsidianVersion(selectedRecording)}
+                        className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] cursor-pointer"
+                      >
+                        Keep Obsidian version
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5 text-[12.5px] text-[var(--ink-muted)]">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {isSelectedWrittenToActiveVault ? (
+                        <span className="inline-flex items-center gap-1.5 text-[var(--ink-secondary)]">
+                          <FolderCheck className="h-3.5 w-3.5" />
+                          Written to {vault?.folderName} (.md + audio)
+                        </span>
+                      ) : vault && vaultPermission === 'granted' ? (
+                        <button
+                          type="button"
+                          onClick={() => void syncSingleToVault(selectedRecording.id)}
+                          className="inline-flex items-center gap-1.5 text-[var(--ink-secondary)] hover:text-[var(--ink)] underline underline-offset-4 cursor-pointer"
+                        >
+                          <FolderOpen className="h-3.5 w-3.5" />
+                          Write to {vault.folderName}
+                        </button>
+                      ) : vault && vaultPermission === 'prompt' ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleReconnectVault().catch(() => {})}
+                          className="inline-flex items-center gap-1.5 text-[var(--ink-secondary)] hover:text-[var(--ink)] underline underline-offset-4 cursor-pointer"
+                        >
+                          <FolderOpen className="h-3.5 w-3.5" />
+                          Reconnect {vault.folderName} to write
+                        </button>
+                      ) : vaultPermission !== 'unsupported' ? (
+                        <button
+                          type="button"
+                          onClick={() => setSettingsOpen(true)}
+                          className="inline-flex items-center gap-1.5 hover:text-[var(--ink)] cursor-pointer"
+                        >
+                          <FolderOpen className="h-3.5 w-3.5" />
+                          Connect Obsidian vault folder
+                        </button>
+                      ) : null}
+
+                      {selectedRecording.audioSizeBytes > OBSIDIAN_STANDARD_LIMIT_BYTES && (
+                        <span className="rounded-md bg-[var(--surface-subtle)] px-2 py-0.5 text-[11.5px] text-[var(--ink-secondary)]">
+                          {formatBytes(selectedRecording.audioSizeBytes)} · exceeds Obsidian Sync
+                          Standard 5 MB file limit (Plus: 200 MB)
+                        </span>
+                      )}
+                    </div>
+                    {selectedVaultExport?.state === 'error' && selectedVaultExport.error && (
+                      <p className="text-[12.5px] text-[var(--vermilion)]">
+                        {selectedVaultExport.error}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Queued / Failed Transcription Banner */}
+                {selectedRecording.status === 'queued' && (
+                  <div className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <p className="text-[14px] font-medium text-[var(--ink)]">
+                        {!geminiSettings.apiKey.trim()
+                          ? 'Audio saved — Gemini API key needed'
+                          : !isOnline
+                            ? 'Audio saved offline'
+                            : 'Queued for transcription'}
+                      </p>
+                      <p className="text-[13px] text-[var(--ink-muted)]">
+                        {!geminiSettings.apiKey.trim()
+                          ? 'Add your Gemini API key in Settings to transcribe and organize this clip.'
+                          : !isOnline
+                            ? 'Tapeleaf will transcribe this note automatically once you are back online.'
+                            : 'Starting transcription shortly…'}
+                      </p>
+                    </div>
+                    {!geminiSettings.apiKey.trim() ? (
+                      <button
+                        type="button"
+                        onClick={() => setSettingsOpen(true)}
+                        className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[var(--ink)] px-3.5 text-[13px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
+                      >
+                        <Settings className="h-3.5 w-3.5" />
+                        Open Settings
+                      </button>
+                    ) : isOnline ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setQueuePausedReason(null);
+                          queuePausedRef.current = null;
+                          void drainTranscriptionQueue();
+                        }}
+                        className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[var(--ink)] px-3.5 text-[13px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        Transcribe now
+                      </button>
+                    ) : null}
+                  </div>
+                )}
+
                 {selectedRecording.status === 'failed' && (
                   <div className="rounded-2xl border border-[var(--border-strong)] bg-[var(--canvas)] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div className="space-y-1">
-                      <p className="inline-flex items-center gap-2 text-[13.5px] font-medium text-[var(--ink)]">
+                      <p className="inline-flex items-center gap-2 text-[14px] font-medium text-[var(--ink)]">
                         <AlertCircle className="h-4 w-4 text-[var(--vermilion)]" />
                         Audio is saved, but transcription didn’t finish
                       </p>
-                      <p className="text-[12.5px] text-[var(--ink-muted)]">
+                      <p className="text-[13px] text-[var(--ink-muted)]">
                         {selectedRecording.errorMessage ||
                           'Tap Retry processing to transcribe this audio clip.'}
                       </p>
@@ -1861,7 +2384,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => void handleReprocess(selectedRecording)}
-                      className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[var(--ink)] px-3.5 text-[12.5px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
+                      className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[var(--ink)] px-3.5 text-[13px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
                     >
                       <RefreshCw className="h-3.5 w-3.5" />
                       Retry processing
@@ -1937,8 +2460,8 @@ export default function App() {
                       Listening &amp; organizing…
                     </div>
                     <p className="text-[14px] leading-relaxed text-[var(--ink-muted)]">
-                      Your audio is safely saved on disk. Detecting language, transcribing,
-                      summarizing, and writing the Obsidian Markdown note.
+                      Your audio is safely saved on this device. Detecting language, transcribing,
+                      summarizing, and formatting your Obsidian note.
                     </p>
                     <div className="space-y-2 pt-1">
                       <div className="shimmer-bar h-3.5 w-full rounded-full" />
@@ -1991,16 +2514,33 @@ export default function App() {
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
             <TapeleafMark />
-            <h2 className="mt-4 text-[16px] font-medium text-[var(--ink)]">
+            <h2 className="mt-4 text-[17px] font-medium text-[var(--ink)]">
               Tap Record to capture a thought
             </h2>
-            <p className="mt-1.5 max-w-xs text-[13.5px] leading-relaxed text-[var(--ink-muted)]">
-              Every voice memo is saved as a clean Obsidian-ready Markdown note with YAML
-              frontmatter.
+            <p className="mt-1.5 max-w-xs text-[14px] leading-relaxed text-[var(--ink-muted)]">
+              Zero server needed. Notes save on your device and write both Markdown and audio
+              straight into your Obsidian vault folder.
             </p>
           </div>
         )}
       </main>
+
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        apiKey={geminiSettings.apiKey}
+        rememberKey={geminiSettings.rememberOnDevice}
+        model={geminiSettings.model}
+        onSaveGemini={handleSaveGeminiSettings}
+        vault={vault}
+        vaultPermission={vaultPermission}
+        pendingVaultCount={pendingVaultCount}
+        recordingCount={recordings.length}
+        onConnectVault={handleConnectVault}
+        onReconnectVault={handleReconnectVault}
+        onDisconnectVault={handleDisconnectVault}
+        onSyncVaultNow={handleSyncVaultNow}
+      />
     </div>
   );
 }

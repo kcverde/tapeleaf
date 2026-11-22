@@ -3,34 +3,62 @@ import type { CapturedAudio } from '../types';
 
 export type RecorderStatus = 'idle' | 'requesting' | 'recording' | 'paused';
 
+// Prefer explicit AAC/MP4 (.m4a) when supported & playable for broadest Obsidian Sync
+// playback across Android, macOS, and iOS; fall back cleanly to WebM/Opus or Ogg/Opus.
 const MIME_CANDIDATES = [
-  'audio/webm;codecs=opus',
-  'audio/webm',
   'audio/mp4;codecs=mp4a.40.2',
   'audio/mp4',
+  'audio/webm;codecs=opus',
+  'audio/webm',
   'audio/ogg;codecs=opus',
 ] as const;
 
 const BAR_COUNT = 26;
 const EMPTY_LEVELS = Array.from({ length: BAR_COUNT }, () => 0.08);
+const ERROR_FINALIZE_FALLBACK_MS = 1500;
 
-export function probeSupportedMimeType(): string {
+export function probeSupportedMimeTypes(): string[] {
   if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined') {
-    return '';
+    return [];
   }
+  const probeAudio =
+    typeof document !== 'undefined' ? document.createElement('audio') : null;
+
+  const playable: string[] = [];
+  const recorderOnly: string[] = [];
+
   for (const candidate of MIME_CANDIDATES) {
-    if (MediaRecorder.isTypeSupported(candidate)) {
-      return candidate;
+    if (!MediaRecorder.isTypeSupported(candidate)) continue;
+    if (probeAudio) {
+      // Require exact candidate playability so explicit codec variants aren't masked by bare container checks
+      if (probeAudio.canPlayType(candidate) !== '') {
+        playable.push(candidate);
+      } else {
+        recorderOnly.push(candidate);
+      }
+    } else {
+      playable.push(candidate);
     }
   }
-  return '';
+
+  return [...playable, ...recorderOnly];
 }
 
-export function extensionForMimeType(mimeType: string): string {
+export function extensionForMimeType(mimeType: string, fallbackName?: string): string {
   const lower = mimeType.toLowerCase();
   if (lower.includes('mp4') || lower.includes('m4a') || lower.includes('aac')) return 'm4a';
   if (lower.includes('ogg')) return 'ogg';
   if (lower.includes('wav')) return 'wav';
+  if (lower.includes('mpeg') || lower.includes('mp3')) return 'mp3';
+  if (lower.includes('flac')) return 'flac';
+  if (lower.includes('webm')) return 'webm';
+
+  if (fallbackName) {
+    const ext = fallbackName.split('.').pop()?.toLowerCase() ?? '';
+    if (['m4a', 'mp4', 'webm', 'ogg', 'wav', 'mp3', 'flac', 'aac'].includes(ext)) {
+      return ext === 'mp4' ? 'm4a' : ext;
+    }
+  }
   return 'webm';
 }
 
@@ -43,7 +71,10 @@ export function useRecorder(options?: UseRecorderOptions) {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [levels, setLevels] = useState<number[]>(EMPTY_LEVELS);
   const [error, setError] = useState<string | null>(null);
-  const [supportedMimeType] = useState<string>(() => probeSupportedMimeType());
+  const [candidateMimeTypes] = useState<string[]>(() => probeSupportedMimeTypes());
+  const [activeMimeType, setActiveMimeType] = useState<string>(
+    () => candidateMimeTypes[0] ?? '',
+  );
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -51,6 +82,7 @@ export function useRecorder(options?: UseRecorderOptions) {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const rafRef = useRef<number | null>(null);
+  const errorTimerRef = useRef<number | null>(null);
   const startedAtRef = useRef<number>(0);
   const accumulatedMsRef = useRef<number>(0);
   const statusRef = useRef<RecorderStatus>('idle');
@@ -59,6 +91,7 @@ export function useRecorder(options?: UseRecorderOptions) {
 
   const finalizedRef = useRef<boolean>(false);
   const discardOnStopRef = useRef<boolean>(false);
+  const hadRecorderErrorRef = useRef<boolean>(false);
   const stopResolverRef = useRef<((audio: CapturedAudio | null) => void) | null>(null);
   const onInterruptedRef = useRef(options?.onInterruptedCapture);
   onInterruptedRef.current = options?.onInterruptedCapture;
@@ -77,6 +110,10 @@ export function useRecorder(options?: UseRecorderOptions) {
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
+    }
+    if (errorTimerRef.current !== null) {
+      window.clearTimeout(errorTimerRef.current);
+      errorTimerRef.current = null;
     }
     if (streamRef.current) {
       for (const track of streamRef.current.getTracks()) {
@@ -106,10 +143,12 @@ export function useRecorder(options?: UseRecorderOptions) {
       const discard = discardOnStopRef.current;
       const chunks = chunksRef.current;
       const resolver = stopResolverRef.current;
+      const hadError = hadRecorderErrorRef.current;
 
       chunksRef.current = [];
       stopResolverRef.current = null;
       discardOnStopRef.current = false;
+      hadRecorderErrorRef.current = false;
       accumulatedMsRef.current = 0;
       setElapsedMs(0);
       levelHistoryRef.current = [...EMPTY_LEVELS];
@@ -135,7 +174,7 @@ export function useRecorder(options?: UseRecorderOptions) {
 
       if (resolver) {
         resolver(captured);
-      } else if (wasInterrupted) {
+      } else if (wasInterrupted || hadError) {
         if (captured) {
           setError('Recording ended unexpectedly — saving the audio captured so far.');
           onInterruptedRef.current?.(captured);
@@ -218,52 +257,100 @@ export function useRecorder(options?: UseRecorderOptions) {
       });
       streamRef.current = stream;
 
-      const options: MediaRecorderOptions = {};
-      if (supportedMimeType) {
-        options.mimeType = supportedMimeType;
-      }
-
-      const recorder = new MediaRecorder(stream, options);
-      const resolvedMime = recorder.mimeType || supportedMimeType || 'audio/webm';
+      // Try each probed candidate MIME type (MP4/AAC -> WebM/Opus -> Ogg -> browser default)
+      // so a runtime constructor or start() failure on one format cleanly falls back to the next.
+      const attempts: (string | undefined)[] = [...candidateMimeTypes, undefined];
+      let recorder: MediaRecorder | null = null;
+      let resolvedMime = 'audio/webm';
+      let lastStartErr: unknown = null;
 
       chunksRef.current = [];
       finalizedRef.current = false;
       discardOnStopRef.current = false;
+      hadRecorderErrorRef.current = false;
       stopResolverRef.current = null;
 
-      // Install all lifecycle handlers at startup so unexpected stops still preserve chunks
-      recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
-          chunksRef.current.push(event.data);
-        }
-      };
+      for (const candidate of attempts) {
+        let trial: MediaRecorder | null = null;
+        try {
+          trial = candidate
+            ? new MediaRecorder(stream, { mimeType: candidate })
+            : new MediaRecorder(stream);
 
-      recorder.onstop = () => {
-        const mime = recorder.mimeType || resolvedMime;
-        const wasInterrupted = !stopResolverRef.current && !discardOnStopRef.current;
-        finalizeCapture(mime, wasInterrupted);
-      };
+          const trialMime = trial.mimeType || candidate || 'audio/webm';
 
-      recorder.onerror = () => {
-        const mime = recorder.mimeType || resolvedMime;
-        if (recorder.state !== 'inactive') {
-          try {
-            recorder.stop();
-            return;
-          } catch {
-            // fall through to finalize immediately
+          trial.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) {
+              chunksRef.current.push(event.data);
+            }
+          };
+
+          trial.onstop = () => {
+            if (errorTimerRef.current !== null) {
+              window.clearTimeout(errorTimerRef.current);
+              errorTimerRef.current = null;
+            }
+            const mime = trial?.mimeType || trialMime;
+            const wasInterrupted =
+              hadRecorderErrorRef.current ||
+              (!stopResolverRef.current && !discardOnStopRef.current);
+            finalizeCapture(mime, wasInterrupted);
+          };
+
+          trial.onerror = () => {
+            // Per MediaStream Recording spec, dataavailable and stop can still fire
+            // after error even when state is already inactive. Record the error and
+            // wait for onstop (with a safety fallback timer if stop never arrives).
+            hadRecorderErrorRef.current = true;
+            const mime = trial?.mimeType || trialMime;
+            if (trial && trial.state !== 'inactive') {
+              try {
+                trial.stop();
+              } catch {
+                // fall through to timer
+              }
+            }
+            if (errorTimerRef.current === null && !finalizedRef.current) {
+              errorTimerRef.current = window.setTimeout(() => {
+                errorTimerRef.current = null;
+                finalizeCapture(mime, true);
+              }, ERROR_FINALIZE_FALLBACK_MS);
+            }
+          };
+
+          trial.start();
+          recorder = trial;
+          resolvedMime = trial.mimeType || trialMime;
+          break;
+        } catch (err) {
+          lastStartErr = err;
+          if (trial) {
+            trial.ondataavailable = null;
+            trial.onstop = null;
+            trial.onerror = null;
           }
         }
-        finalizeCapture(mime, true);
-      };
+      }
+
+      if (!recorder) {
+        throw lastStartErr ?? new Error('Could not initialize MediaRecorder.');
+      }
+
+      setActiveMimeType(resolvedMime);
 
       for (const track of stream.getAudioTracks()) {
         track.onended = () => {
-          if (recorder.state !== 'inactive') {
+          if (recorder && recorder.state !== 'inactive') {
             try {
               recorder.stop();
             } catch {
-              finalizeCapture(recorder.mimeType || resolvedMime, true);
+              hadRecorderErrorRef.current = true;
+              if (errorTimerRef.current === null && !finalizedRef.current) {
+                errorTimerRef.current = window.setTimeout(() => {
+                  errorTimerRef.current = null;
+                  finalizeCapture(recorder?.mimeType || resolvedMime, true);
+                }, ERROR_FINALIZE_FALLBACK_MS);
+              }
             }
           }
         };
@@ -297,8 +384,6 @@ export function useRecorder(options?: UseRecorderOptions) {
       setLevels(EMPTY_LEVELS);
       setElapsedMs(0);
 
-      // Start without a short timeslice so browsers emit cleaner, more seekable containers
-      recorder.start();
       updateStatus('recording');
       startMeterLoop();
     } catch (err) {
@@ -313,7 +398,7 @@ export function useRecorder(options?: UseRecorderOptions) {
         setError('Could not start the microphone. Check device permissions and try again.');
       }
     }
-  }, [finalizeCapture, isSupported, releaseHardware, startMeterLoop, supportedMimeType, updateStatus]);
+  }, [candidateMimeTypes, finalizeCapture, isSupported, releaseHardware, startMeterLoop, updateStatus]);
 
   const pauseRecording = useCallback(() => {
     const recorder = mediaRecorderRef.current;
@@ -347,8 +432,8 @@ export function useRecorder(options?: UseRecorderOptions) {
         // fall through
       }
     }
-    finalizeCapture(supportedMimeType || 'audio/webm', false);
-  }, [finalizeCapture, supportedMimeType]);
+    finalizeCapture(activeMimeType || 'audio/webm', false);
+  }, [activeMimeType, finalizeCapture]);
 
   const stopRecording = useCallback((): Promise<CapturedAudio | null> => {
     return new Promise((resolve) => {
@@ -356,7 +441,7 @@ export function useRecorder(options?: UseRecorderOptions) {
       if (!recorder || recorder.state === 'inactive') {
         if (!finalizedRef.current && chunksRef.current.length > 0) {
           stopResolverRef.current = resolve;
-          finalizeCapture(supportedMimeType || 'audio/webm', false);
+          finalizeCapture(activeMimeType || 'audio/webm', false);
         } else {
           releaseHardware();
           updateStatus('idle');
@@ -369,16 +454,16 @@ export function useRecorder(options?: UseRecorderOptions) {
       try {
         recorder.stop();
       } catch {
-        finalizeCapture(recorder.mimeType || supportedMimeType || 'audio/webm', false);
+        finalizeCapture(recorder.mimeType || activeMimeType || 'audio/webm', false);
       }
     });
-  }, [finalizeCapture, releaseHardware, supportedMimeType, updateStatus]);
+  }, [activeMimeType, finalizeCapture, releaseHardware, updateStatus]);
 
   return {
     status,
     elapsedMs,
     levels,
-    supportedMimeType,
+    supportedMimeType: activeMimeType,
     isSupported,
     error,
     clearError: () => setError(null),
