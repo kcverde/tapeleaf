@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
   ArrowLeft,
   Check,
   Copy,
@@ -18,10 +19,10 @@ import {
   Square,
   Sun,
   Trash2,
+  Upload,
   X,
 } from 'lucide-react';
-import { INITIAL_FIXTURES, getFixtureAudioUrl } from './fixtures';
-import { useRecorder } from './hooks/useRecorder';
+import { extensionForMimeType, useRecorder } from './hooks/useRecorder';
 import {
   buildNoteFilename,
   buildObsidianMarkdown,
@@ -36,6 +37,11 @@ import type { CapturedAudio, Recording } from './types';
 type DetailTab = 'english' | 'original' | 'markdown';
 type ThemeMode = 'light' | 'dark';
 
+interface PendingUpload {
+  captured: CapturedAudio;
+  error: string;
+}
+
 const PLAYBACK_RATES = [1, 1.25, 1.5, 2] as const;
 
 function getInitialTheme(): ThemeMode {
@@ -43,15 +49,6 @@ function getInitialTheme(): ThemeMode {
   const stored = window.localStorage.getItem('tapeleaf-theme');
   if (stored === 'light' || stored === 'dark') return stored;
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-}
-
-function makeRecordingId(): string {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
-  const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-  const suffix = Math.random().toString(36).slice(2, 6);
-  return `rec_${date}_${time}_${suffix}`;
 }
 
 function triggerDownload(blob: Blob, filename: string) {
@@ -98,13 +95,22 @@ function formatCodecLabel(mimeType: string): string {
   return 'AUDIO';
 }
 
-function AudioPlayer({
-  recording,
-  isFixture,
-}: {
-  recording: Recording;
-  isFixture: boolean;
-}) {
+async function readAudioDuration(file: Blob): Promise<number> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const audio = document.createElement('audio');
+    audio.preload = 'metadata';
+    const done = (secs: number) => {
+      URL.revokeObjectURL(url);
+      resolve(Number.isFinite(secs) && secs > 0 ? Math.round(secs) : 0);
+    };
+    audio.onloadedmetadata = () => done(audio.duration);
+    audio.onerror = () => done(0);
+    audio.src = url;
+  });
+}
+
+function AudioPlayer({ recording }: { recording: Recording }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -112,6 +118,7 @@ function AudioPlayer({
   const [rateIndex, setRateIndex] = useState(0);
 
   const playbackRate = PLAYBACK_RATES[rateIndex];
+  const src = recording.audioUrl || `/api/recordings/${encodeURIComponent(recording.id)}/audio`;
 
   useEffect(() => {
     setIsPlaying(false);
@@ -123,7 +130,7 @@ function AudioPlayer({
       el.currentTime = 0;
       el.playbackRate = PLAYBACK_RATES[rateIndex];
     }
-  }, [recording.id, recording.audioUrl]);
+  }, [recording.id, src]);
 
   useEffect(() => {
     if (audioRef.current) {
@@ -133,7 +140,7 @@ function AudioPlayer({
 
   const togglePlay = async () => {
     const el = audioRef.current;
-    if (!el || !recording.audioUrl) return;
+    if (!el) return;
     if (el.paused) {
       try {
         await el.play();
@@ -158,14 +165,18 @@ function AudioPlayer({
     setRateIndex((prev) => (prev + 1) % PLAYBACK_RATES.length);
   };
 
-  const effectiveDuration = mediaDuration > 0 && Number.isFinite(mediaDuration) ? mediaDuration : recording.durationSeconds;
-  const progressPct = effectiveDuration > 0 ? Math.min(100, (currentTime / effectiveDuration) * 100) : 0;
+  const effectiveDuration =
+    mediaDuration > 0 && Number.isFinite(mediaDuration)
+      ? mediaDuration
+      : recording.durationSeconds;
+  const progressPct =
+    effectiveDuration > 0 ? Math.min(100, (currentTime / effectiveDuration) * 100) : 0;
 
   return (
     <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-subtle)]/75 px-3.5 py-3 sm:px-4 sm:py-3.5">
       <audio
         ref={audioRef}
-        src={recording.audioUrl}
+        src={src}
         preload="metadata"
         onLoadedMetadata={(e) => {
           const d = e.currentTarget.duration;
@@ -184,9 +195,8 @@ function AudioPlayer({
         <button
           type="button"
           onClick={() => void togglePlay()}
-          disabled={!recording.audioUrl}
           aria-label={isPlaying ? 'Pause audio' : 'Play audio'}
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--ink)] text-[var(--canvas)] transition-transform hover:opacity-90 active:scale-[0.97] disabled:opacity-40 cursor-pointer"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--ink)] text-[var(--canvas)] transition-transform hover:opacity-90 active:scale-[0.97] cursor-pointer"
         >
           {isPlaying ? (
             <Pause className="h-4 w-4 fill-current" />
@@ -234,14 +244,7 @@ function AudioPlayer({
           />
           <div className="mt-1.5 flex items-center justify-between text-[11px] font-mono tabular-nums text-[var(--ink-muted)]">
             <span>{formatDuration(currentTime)}</span>
-            <div className="flex items-center gap-2">
-              {isFixture && (
-                <span className="font-sans text-[10.5px] text-[var(--ink-muted)]/80">
-                  Demo tone
-                </span>
-              )}
-              <span>{formatDuration(effectiveDuration)}</span>
-            </div>
+            <span>{formatDuration(effectiveDuration)}</span>
           </div>
         </div>
 
@@ -349,7 +352,10 @@ function MarkdownPreview({
           }
           if (line.startsWith('![[')) {
             return (
-              <div key={index} className="text-[var(--ink-muted)] underline decoration-dotted underline-offset-4">
+              <div
+                key={index}
+                className="text-[var(--ink-muted)] underline decoration-dotted underline-offset-4"
+              >
                 {line}
               </div>
             );
@@ -367,8 +373,10 @@ function MarkdownPreview({
 
 export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
-  const [recordings, setRecordings] = useState<Recording[]>(INITIAL_FIXTURES);
-  const [selectedId, setSelectedId] = useState<string>(INITIAL_FIXTURES[0]?.id ?? '');
+  const [recordings, setRecordings] = useState<Recording[]>([]);
+  const [loadingLibrary, setLoadingLibrary] = useState(true);
+  const [libraryError, setLibraryError] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string>('');
   const [mobileView, setMobileView] = useState<'list' | 'detail'>('list');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
@@ -379,13 +387,15 @@ export default function App() {
   const [addingTag, setAddingTag] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [savedToast, setSavedToast] = useState(false);
+  const [pendingUpload, setPendingUpload] = useState<PendingUpload | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const tagInputRef = useRef<HTMLInputElement | null>(null);
-  const fixtureIdsRef = useRef<Set<string>>(new Set(INITIAL_FIXTURES.map((r) => r.id)));
-  const processingTimersRef = useRef<Map<string, number>>(new Map());
-  const objectUrlsRef = useRef<string[]>([]);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const savedTimerRef = useRef<number | null>(null);
 
   const recorder = useRecorder();
 
@@ -394,18 +404,70 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    const timers = processingTimersRef.current;
     return () => {
-      for (const timerId of timers.values()) {
-        window.clearTimeout(timerId);
-      }
-      for (const url of objectUrlsRef.current) {
-        URL.revokeObjectURL(url);
-      }
+      if (savedTimerRef.current) window.clearTimeout(savedTimerRef.current);
     };
   }, []);
 
-  // Keyboard shortcut: `/` focuses search when not typing in an input
+  const fetchRecordings = useCallback(async (silent = false) => {
+    if (!silent) setLibraryError(null);
+    try {
+      const res = await fetch('/api/recordings', { cache: 'no-store' });
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status}`);
+      }
+      const data = (await res.json()) as { recordings: Recording[] };
+      setRecordings(data.recordings);
+      setSelectedId((prev) => {
+        if (prev && data.recordings.some((r) => r.id === prev)) return prev;
+        return data.recordings[0]?.id ?? '';
+      });
+      setLibraryError(null);
+    } catch {
+      if (!silent) {
+        setLibraryError('Could not reach Tapeleaf server.');
+      }
+    } finally {
+      setLoadingLibrary(false);
+    }
+  }, []);
+
+  // Initial load
+  useEffect(() => {
+    void fetchRecordings(false);
+  }, [fetchRecordings]);
+
+  // Refresh on window focus / visibility for phone ↔ desktop sync
+  useEffect(() => {
+    const onFocus = () => void fetchRecordings(true);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchRecordings(true);
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [fetchRecordings]);
+
+  // Poll gently while any clip is processing
+  const hasProcessing = useMemo(
+    () => recordings.some((r) => r.status === 'processing'),
+    [recordings],
+  );
+
+  useEffect(() => {
+    if (!hasProcessing) return;
+    const interval = window.setInterval(() => {
+      void fetchRecordings(true);
+    }, 1500);
+    return () => window.clearInterval(interval);
+  }, [hasProcessing, fetchRecordings]);
+
+  // Keyboard shortcut: `/` focuses search
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -430,7 +492,6 @@ export default function App() {
     });
   };
 
-  // All tags sorted by frequency
   const allTags = useMemo(() => {
     const counts = new Map<string, number>();
     for (const rec of recordings) {
@@ -471,14 +532,12 @@ export default function App() {
     );
   }, [recordings, selectedId, filteredRecordings]);
 
-  // Reset detail tab if switching to an English recording while on Original
   useEffect(() => {
     if (selectedRecording?.isEnglish && detailTab === 'original') {
       setDetailTab('english');
     }
   }, [selectedRecording?.id, selectedRecording?.isEnglish, detailTab]);
 
-  // Close inline editors when selection changes
   useEffect(() => {
     setEditingTitle(false);
     setAddingTag(false);
@@ -504,131 +563,145 @@ export default function App() {
     setMobileView('detail');
   };
 
-  const enqueueCapturedClip = useCallback((captured: CapturedAudio, simulated = false) => {
-    const id = makeRecordingId();
-    const created = new Date().toISOString();
-    const objectUrl = URL.createObjectURL(captured.blob);
-    objectUrlsRef.current.push(objectUrl);
-
-    const stub: Recording = {
-      id,
-      title: 'New voice note',
-      created,
-      durationSeconds: captured.durationSeconds,
-      language: 'en',
-      languageName: 'English',
-      isEnglish: true,
-      status: 'processing',
-      summary: '',
-      tags: [],
-      audioPath: `audio/${id}.${captured.extension}`,
-      audioUrl: objectUrl,
-      audioMimeType: captured.mimeType,
-      englishTranscript: '',
-    };
-
-    setRecordings((prev) => [stub, ...prev]);
-    setSelectedId(id);
-    setSelectedTag(null);
-    setSearchQuery('');
-    setDetailTab('english');
-    setMobileView('detail');
-
-    const timer = window.setTimeout(() => {
-      setRecordings((prev) =>
-        prev.map((rec) =>
-          rec.id === id
-            ? {
-                ...rec,
-                status: 'ready',
-                title: simulated
-                  ? 'Sample capture — evening walk notes'
-                  : 'Quick captured voice note',
-                summary: simulated
-                  ? 'Demo clip captured in prototype mode; Gemini transcription wires up in Phase 2.'
-                  : 'Audio captured locally in your browser; live Gemini transcription and translation connect in Phase 2.',
-                tags: simulated ? ['demo', 'ideas'] : ['inbox', 'voice-note'],
-                englishTranscript: simulated
-                  ? 'This is a simulated prototype capture showing Tapeleaf’s complete flow: instant local audio capture, the calm organizing shimmer, and an Obsidian-ready Markdown note with YAML frontmatter.\n\nOnce Phase 2 connects the Hono backend and Gemini audio pipeline, every clip will be saved to disk, language-detected, translated to English when needed, titled, and tagged automatically.'
-                  : `Captured ${formatDuration(captured.durationSeconds)} of live microphone audio (${formatCodecLabel(captured.mimeType)}).\n\nPress Play above to verify your recording right now, edit the title or tags inline, or switch to the Markdown tab to inspect the Obsidian-ready note. In Phase 2, this clip will stream to the Hono backend and Gemini for real multilingual transcription and translation.`,
-              }
-            : rec,
-        ),
-      );
-      processingTimersRef.current.delete(id);
-    }, 2400);
-
-    processingTimersRef.current.set(id, timer);
+  const showSavedConfirmation = useCallback(() => {
+    setSavedToast(true);
+    if (savedTimerRef.current) window.clearTimeout(savedTimerRef.current);
+    savedTimerRef.current = window.setTimeout(() => setSavedToast(false), 2600);
   }, []);
+
+  const uploadCapturedAudio = useCallback(
+    async (captured: CapturedAudio) => {
+      setUploading(true);
+      setPendingUpload(null);
+
+      try {
+        const form = new FormData();
+        const filename = `recording.${captured.extension}`;
+        form.append('audio', captured.blob, filename);
+        form.append('durationSeconds', String(captured.durationSeconds));
+        form.append('mimeType', captured.mimeType);
+
+        const res = await fetch('/api/recordings', {
+          method: 'POST',
+          body: form,
+        });
+
+        if (!res.ok) {
+          const payload = (await res.json().catch(() => ({}))) as { error?: string };
+          throw new Error(payload.error || `Upload failed (${res.status})`);
+        }
+
+        const data = (await res.json()) as { recording: Recording };
+        setRecordings((prev) => [
+          data.recording,
+          ...prev.filter((r) => r.id !== data.recording.id),
+        ]);
+        setSelectedId(data.recording.id);
+        setSelectedTag(null);
+        setSearchQuery('');
+        setDetailTab('english');
+        setMobileView('detail');
+        showSavedConfirmation();
+      } catch (err) {
+        const message =
+          err instanceof Error
+            ? err.message
+            : 'Could not upload audio. Your recording is still safe in this tab.';
+        setPendingUpload({ captured, error: message });
+      } finally {
+        setUploading(false);
+      }
+    },
+    [showSavedConfirmation],
+  );
 
   const handleStopRecording = async () => {
     const captured = await recorder.stopRecording();
     if (captured) {
-      enqueueCapturedClip(captured, false);
+      await uploadCapturedAudio(captured);
     }
   };
 
-  const handleSimulateCapture = () => {
-    recorder.clearError();
-    const url = getFixtureAudioUrl(`sim_${Date.now()}`, [293.66, 349.23, 440.0, 523.25]);
-    fetch(url)
-      .then((res) => res.blob())
-      .then((blob) => {
-        enqueueCapturedClip(
-          {
-            blob,
-            mimeType: 'audio/wav',
-            durationSeconds: 8,
-            extension: 'wav',
-          },
-          true,
-        );
-      })
-      .catch(() => {});
-  };
-
-  const handleReprocess = (recording: Recording) => {
-    if (recording.status === 'processing') return;
-    const prevSnapshot = { ...recording };
-    setRecordings((prev) =>
-      prev.map((r) => (r.id === recording.id ? { ...r, status: 'processing' } : r)),
-    );
-    const existing = processingTimersRef.current.get(recording.id);
-    if (existing) window.clearTimeout(existing);
-
-    const timer = window.setTimeout(() => {
-      setRecordings((prev) =>
-        prev.map((r) =>
-          r.id === recording.id
-            ? {
-                ...r,
-                status: 'ready',
-                title: r.title || prevSnapshot.title,
-                summary: r.summary || prevSnapshot.summary,
-              }
-            : r,
-        ),
-      );
-      processingTimersRef.current.delete(recording.id);
-    }, 2000);
-    processingTimersRef.current.set(recording.id, timer);
-  };
-
-  const handleDelete = (id: string) => {
-    const existing = processingTimersRef.current.get(id);
-    if (existing) {
-      window.clearTimeout(existing);
-      processingTimersRef.current.delete(id);
-    }
-    setRecordings((prev) => {
-      const next = prev.filter((r) => r.id !== id);
-      if (selectedId === id) {
-        setSelectedId(next[0]?.id ?? '');
-        setMobileView('list');
-      }
-      return next;
+  const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    const durationSeconds = await readAudioDuration(file);
+    const mimeType = file.type || 'audio/webm';
+    await uploadCapturedAudio({
+      blob: file,
+      mimeType,
+      durationSeconds,
+      extension: extensionForMimeType(mimeType),
     });
+  };
+
+  const handleDownloadPendingAudio = () => {
+    if (!pendingUpload) return;
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    triggerDownload(
+      pendingUpload.captured.blob,
+      `tapeleaf-unsaved-${stamp}.${pendingUpload.captured.extension}`,
+    );
+  };
+
+  const handleReprocess = async (recording: Recording) => {
+    if (recording.status === 'processing') return;
+    setRecordings((prev) =>
+      prev.map((r) =>
+        r.id === recording.id ? { ...r, status: 'processing', errorMessage: undefined } : r,
+      ),
+    );
+    try {
+      const res = await fetch(`/api/recordings/${encodeURIComponent(recording.id)}/reprocess`, {
+        method: 'POST',
+      });
+      if (!res.ok) throw new Error('Reprocess failed');
+      const data = (await res.json()) as { recording: Recording };
+      setRecordings((prev) => prev.map((r) => (r.id === recording.id ? data.recording : r)));
+    } catch {
+      void fetchRecordings(true);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
     setConfirmDeleteId(null);
+    const previous = recordings;
+    const next = recordings.filter((r) => r.id !== id);
+    setRecordings(next);
+    if (selectedId === id) {
+      setSelectedId(next[0]?.id ?? '');
+      setMobileView('list');
+    }
+
+    try {
+      const res = await fetch(`/api/recordings/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) {
+        setRecordings(previous);
+      }
+    } catch {
+      setRecordings(previous);
+    }
+  };
+
+  const persistPatch = async (id: string, patch: { title?: string; tags?: string[] }) => {
+    try {
+      const res = await fetch(`/api/recordings/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        void fetchRecordings(true);
+        return;
+      }
+      const data = (await res.json()) as { recording: Recording };
+      setRecordings((prev) => prev.map((r) => (r.id === id ? data.recording : r)));
+    } catch {
+      void fetchRecordings(true);
+    }
   };
 
   const startEditingTitle = () => {
@@ -640,42 +713,41 @@ export default function App() {
   const commitTitleEdit = () => {
     if (!selectedRecording) return;
     const trimmed = titleDraft.trim();
+    setEditingTitle(false);
     if (trimmed && trimmed !== selectedRecording.title) {
       setRecordings((prev) =>
         prev.map((r) => (r.id === selectedRecording.id ? { ...r, title: trimmed } : r)),
       );
+      void persistPatch(selectedRecording.id, { title: trimmed });
     }
-    setEditingTitle(false);
   };
 
   const handleAddTag = () => {
     if (!selectedRecording) return;
     const clean = normalizeTag(tagDraft);
-    if (clean && !selectedRecording.tags.includes(clean)) {
-      setRecordings((prev) =>
-        prev.map((r) =>
-          r.id === selectedRecording.id ? { ...r, tags: [...r.tags, clean] } : r,
-        ),
-      );
-    }
     setTagDraft('');
     setAddingTag(false);
+    if (clean && !selectedRecording.tags.includes(clean)) {
+      const nextTags = [...selectedRecording.tags, clean];
+      setRecordings((prev) =>
+        prev.map((r) => (r.id === selectedRecording.id ? { ...r, tags: nextTags } : r)),
+      );
+      void persistPatch(selectedRecording.id, { tags: nextTags });
+    }
   };
 
-  const handleRemoveTag = (recordingId: string, tagToRemove: string) => {
+  const handleRemoveTag = (recording: Recording, tagToRemove: string) => {
+    const nextTags = recording.tags.filter((t) => t !== tagToRemove);
     setRecordings((prev) =>
-      prev.map((r) =>
-        r.id === recordingId
-          ? { ...r, tags: r.tags.filter((t) => t !== tagToRemove) }
-          : r,
-      ),
+      prev.map((r) => (r.id === recording.id ? { ...r, tags: nextTags } : r)),
     );
     if (selectedTag === tagToRemove) {
       const stillExists = recordings.some(
-        (r) => r.id !== recordingId && r.tags.includes(tagToRemove),
+        (r) => r.id !== recording.id && r.tags.includes(tagToRemove),
       );
       if (!stillExists) setSelectedTag(null);
     }
+    void persistPatch(recording.id, { tags: nextTags });
   };
 
   const selectedMarkdown = useMemo(
@@ -683,10 +755,10 @@ export default function App() {
     [selectedRecording],
   );
 
-  const selectedFilename = useMemo(
-    () => (selectedRecording ? buildNoteFilename(selectedRecording) : 'note.md'),
-    [selectedRecording],
-  );
+  const selectedFilename = useMemo(() => {
+    if (!selectedRecording) return 'note.md';
+    return selectedRecording.filename || buildNoteFilename(selectedRecording);
+  }, [selectedRecording]);
 
   const handleCopyMarkdown = async () => {
     if (!selectedRecording) return;
@@ -697,7 +769,6 @@ export default function App() {
         setCopiedId((cur) => (cur === selectedRecording.id ? null : cur));
       }, 2000);
     } catch {
-      // Fallback textarea copy
       const ta = document.createElement('textarea');
       ta.value = selectedMarkdown;
       ta.style.position = 'fixed';
@@ -715,23 +786,21 @@ export default function App() {
 
   const handleDownloadMarkdown = () => {
     if (!selectedRecording) return;
-    const blob = new Blob([selectedMarkdown], { type: 'text/markdown;charset=utf-8' });
-    triggerDownload(blob, selectedFilename);
+    const a = document.createElement('a');
+    a.href = `/api/recordings/${encodeURIComponent(selectedRecording.id)}/markdown`;
+    a.download = selectedFilename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   };
 
-  const handleDownloadAudio = async () => {
-    if (!selectedRecording?.audioUrl) return;
-    try {
-      const res = await fetch(selectedRecording.audioUrl);
-      const blob = await res.blob();
-      const ext = selectedRecording.audioMimeType?.includes('wav')
-        ? 'wav'
-        : selectedRecording.audioPath.split('.').pop() || 'webm';
-      const baseName = selectedFilename.replace(/\.md$/, '');
-      triggerDownload(blob, `${baseName}.${ext}`);
-    } catch {
-      // ignore
-    }
+  const handleDownloadAudio = () => {
+    if (!selectedRecording) return;
+    const a = document.createElement('a');
+    a.href = `/api/recordings/${encodeURIComponent(selectedRecording.id)}/audio?download=1`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   };
 
   const isActiveRecording = recorder.status === 'recording' || recorder.status === 'paused';
@@ -759,15 +828,27 @@ export default function App() {
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={toggleTheme}
-            aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-            title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
-            className="flex h-10 w-10 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
-          >
-            {theme === 'dark' ? <Sun className="h-[18px] w-[18px]" /> : <Moon className="h-[18px] w-[18px]" />}
-          </button>
+          <div className="flex items-center gap-1">
+            {savedToast && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--surface-subtle)] px-2.5 py-1 text-[11.5px] font-medium text-[var(--ink-secondary)]">
+                <Check className="h-3 w-3" />
+                Saved
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={toggleTheme}
+              aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+              title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
+              className="flex h-10 w-10 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+            >
+              {theme === 'dark' ? (
+                <Sun className="h-[18px] w-[18px]" />
+              ) : (
+                <Moon className="h-[18px] w-[18px]" />
+              )}
+            </button>
+          </div>
         </header>
 
         {/* Search Bar + Tag Filter Pills */}
@@ -800,69 +881,109 @@ export default function App() {
           </div>
 
           {/* Horizontal Scrollable Tag Pills */}
-          <div
-            className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5"
-            role="tablist"
-            aria-label="Filter by tag"
-          >
-            <button
-              type="button"
-              onClick={() => setSelectedTag(null)}
-              className={[
-                'shrink-0 rounded-full px-3 py-1.5 text-[12px] font-medium transition-colors cursor-pointer',
-                selectedTag === null
-                  ? 'bg-[var(--pill-active-bg)] text-[var(--pill-active-ink)]'
-                  : 'bg-[var(--surface-subtle)] text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)]',
-              ].join(' ')}
+          {allTags.length > 0 && (
+            <div
+              className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5"
+              role="tablist"
+              aria-label="Filter by tag"
             >
-              All
-            </button>
-            {allTags.map((tag) => {
-              const active = selectedTag === tag;
-              return (
-                <button
-                  key={tag}
-                  type="button"
-                  onClick={() => setSelectedTag(active ? null : tag)}
-                  className={[
-                    'shrink-0 rounded-full px-3 py-1.5 text-[12px] font-medium transition-colors cursor-pointer',
-                    active
-                      ? 'bg-[var(--pill-active-bg)] text-[var(--pill-active-ink)]'
-                      : 'bg-[var(--surface-subtle)] text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)]',
-                  ].join(' ')}
-                >
-                  #{tag}
-                </button>
-              );
-            })}
-          </div>
+              <button
+                type="button"
+                onClick={() => setSelectedTag(null)}
+                className={[
+                  'shrink-0 rounded-full px-3 py-1.5 text-[12px] font-medium transition-colors cursor-pointer',
+                  selectedTag === null
+                    ? 'bg-[var(--pill-active-bg)] text-[var(--pill-active-ink)]'
+                    : 'bg-[var(--surface-subtle)] text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)]',
+                ].join(' ')}
+              >
+                All
+              </button>
+              {allTags.map((tag) => {
+                const active = selectedTag === tag;
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => setSelectedTag(active ? null : tag)}
+                    className={[
+                      'shrink-0 rounded-full px-3 py-1.5 text-[12px] font-medium transition-colors cursor-pointer',
+                      active
+                        ? 'bg-[var(--pill-active-bg)] text-[var(--pill-active-ink)]'
+                        : 'bg-[var(--surface-subtle)] text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)]',
+                    ].join(' ')}
+                  >
+                    #{tag}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Scannable Library Card Feed */}
         <div className="flex-1 overflow-y-auto px-4 sm:px-5 pb-4 space-y-2">
-          {filteredRecordings.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-[var(--border-strong)] px-5 py-10 text-center">
-              <p className="text-[14px] font-medium text-[var(--ink)]">No matching voice notes</p>
-              <p className="mt-1 text-[13px] text-[var(--ink-muted)]">
-                Try clearing your search or choosing another tag.
-              </p>
-              {(searchQuery || selectedTag) && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSearchQuery('');
-                    setSelectedTag(null);
-                  }}
-                  className="mt-3 inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] cursor-pointer"
+          {libraryError ? (
+            <div className="rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] px-4 py-6 text-center">
+              <p className="text-[13.5px] font-medium text-[var(--ink)]">{libraryError}</p>
+              <button
+                type="button"
+                onClick={() => void fetchRecordings(false)}
+                className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-subtle)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Retry
+              </button>
+            </div>
+          ) : loadingLibrary ? (
+            <div className="space-y-2">
+              {[0, 1, 2].map((i) => (
+                <div
+                  key={i}
+                  className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 space-y-2.5"
                 >
-                  Reset filters
-                </button>
+                  <div className="shimmer-bar h-3.5 w-3/5 rounded-full" />
+                  <div className="shimmer-bar h-3 w-11/12 rounded-full" />
+                  <div className="shimmer-bar h-2.5 w-1/3 rounded-full" />
+                </div>
+              ))}
+            </div>
+          ) : filteredRecordings.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-[var(--border-strong)] px-5 py-10 text-center">
+              {recordings.length === 0 ? (
+                <>
+                  <p className="text-[14px] font-medium text-[var(--ink)]">No voice notes yet</p>
+                  <p className="mt-1 text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                    Tap Record below or upload an audio clip. Each note is saved directly as
+                    Obsidian-ready Markdown.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="text-[14px] font-medium text-[var(--ink)]">
+                    No matching voice notes
+                  </p>
+                  <p className="mt-1 text-[13px] text-[var(--ink-muted)]">
+                    Try clearing your search or choosing another tag.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery('');
+                      setSelectedTag(null);
+                    }}
+                    className="mt-3 inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] cursor-pointer"
+                  >
+                    Reset filters
+                  </button>
+                </>
               )}
             </div>
           ) : (
             filteredRecordings.map((rec) => {
               const isSelected = selectedRecording?.id === rec.id;
               const isProcessing = rec.status === 'processing';
+              const isFailed = rec.status === 'failed';
               return (
                 <button
                   key={rec.id}
@@ -909,10 +1030,17 @@ export default function App() {
                         </span>
                       </div>
 
-                      {rec.summary && (
-                        <p className="mt-1 text-[13px] leading-[1.45] text-[var(--ink-secondary)] line-clamp-2">
-                          {rec.summary}
+                      {isFailed ? (
+                        <p className="mt-1 inline-flex items-center gap-1.5 text-[12.5px] text-[var(--vermilion)]">
+                          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                          Audio saved · tap to retry transcription
                         </p>
+                      ) : (
+                        rec.summary && (
+                          <p className="mt-1 text-[13px] leading-[1.45] text-[var(--ink-secondary)] line-clamp-2">
+                            {rec.summary}
+                          </p>
+                        )
                       )}
 
                       <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -920,17 +1048,14 @@ export default function App() {
                           {formatDuration(rec.durationSeconds)}
                         </span>
 
-                        {!rec.isEnglish && (
+                        {!rec.isEnglish && !isFailed && (
                           <span className="rounded-md bg-[var(--surface-subtle)] px-1.5 py-0.5 font-mono text-[10px] font-medium tracking-wide text-[var(--ink-secondary)]">
                             {rec.language.toUpperCase()} → EN
                           </span>
                         )}
 
                         {rec.tags.slice(0, 4).map((tag) => (
-                          <span
-                            key={tag}
-                            className="text-[11px] text-[var(--ink-muted)]"
-                          >
+                          <span key={tag} className="text-[11px] text-[var(--ink-muted)]">
                             #{tag}
                           </span>
                         ))}
@@ -945,6 +1070,52 @@ export default function App() {
 
         {/* Bottom Record Dock (Mobile Thumb-Zone + Desktop Left Rail) */}
         <div className="shrink-0 border-t border-[var(--border)] bg-[var(--canvas)]/95 backdrop-blur-md px-4 sm:px-5 pt-3 safe-bottom">
+          {/* Unsaved Upload Recovery Card */}
+          {pendingUpload && (
+            <div className="mb-3 rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] p-3 text-[12.5px]">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="h-4 w-4 shrink-0 text-[var(--vermilion)] mt-0.5" />
+                  <div>
+                    <p className="font-medium text-[var(--ink)]">
+                      Upload failed — audio kept safely in this tab
+                    </p>
+                    <p className="mt-0.5 text-[11.5px] text-[var(--ink-muted)]">
+                      {pendingUpload.error}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPendingUpload(null)}
+                  aria-label="Dismiss unsaved recording"
+                  className="shrink-0 rounded p-0.5 text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="mt-2.5 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void uploadCapturedAudio(pendingUpload.captured)}
+                  disabled={uploading}
+                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-3 text-[12px] font-medium text-[var(--canvas)] hover:opacity-90 disabled:opacity-50 cursor-pointer"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Retry upload
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadPendingAudio}
+                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] px-3 text-[12px] font-medium text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Download Audio
+                </button>
+              </div>
+            </div>
+          )}
+
           {recorder.error && (
             <div className="mb-3 rounded-xl border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-2.5 text-[12px] text-[var(--ink-secondary)]">
               <div className="flex items-start justify-between gap-2">
@@ -958,15 +1129,16 @@ export default function App() {
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
-              <button
-                type="button"
-                onClick={handleSimulateCapture}
-                className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-[var(--surface-subtle)] px-2.5 py-1 text-[11.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
-              >
-                Try sample capture
-              </button>
             </div>
           )}
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="audio/*"
+            onChange={(e) => void handleFileImport(e)}
+            className="hidden"
+          />
 
           {isActiveRecording ? (
             <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3.5 shadow-[0_2px_10px_rgba(0,0,0,0.04)]">
@@ -1007,7 +1179,8 @@ export default function App() {
                 aria-hidden="true"
               >
                 {recorder.levels.map((level, i) => {
-                  const isRecent = i >= recorder.levels.length - 4 && recorder.status === 'recording';
+                  const isRecent =
+                    i >= recorder.levels.length - 4 && recorder.status === 'recording';
                   const heightPct = Math.round(Math.max(12, Math.min(100, level * 100)));
                   return (
                     <span
@@ -1058,28 +1231,45 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center justify-between gap-2.5">
               <div className="min-w-0">
                 <p className="text-[12.5px] font-medium text-[var(--ink)]">
-                  {recorder.status === 'requesting' ? 'Requesting mic…' : 'Ready to record'}
+                  {uploading
+                    ? 'Saving audio…'
+                    : recorder.status === 'requesting'
+                      ? 'Requesting mic…'
+                      : 'Ready to record'}
                 </p>
                 <p className="font-mono text-[10.5px] tracking-wide text-[var(--ink-muted)] truncate">
                   {formatCodecLabel(recorder.supportedMimeType)} · Obsidian .md
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => void recorder.startRecording()}
-                disabled={recorder.status === 'requesting'}
-                aria-label="Start recording"
-                className="group relative flex h-[52px] items-center gap-2.5 rounded-full bg-[var(--vermilion)] pl-4 pr-5 text-white shadow-[0_2px_10px_rgba(229,72,77,0.28)] hover:bg-[var(--vermilion-hover)] active:scale-[0.98] transition-all disabled:opacity-60 cursor-pointer shrink-0"
-              >
-                <span className="flex h-5 w-5 items-center justify-center rounded-full border border-white/45">
-                  <span className="h-2.5 w-2.5 rounded-full bg-white" />
-                </span>
-                <span className="text-[14px] font-medium tracking-[-0.01em]">Record</span>
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading || recorder.status === 'requesting'}
+                  title="Upload audio file"
+                  aria-label="Upload audio file"
+                  className="flex h-11 w-11 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--ink-muted)] hover:border-[var(--border-strong)] hover:text-[var(--ink)] transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  <Upload className="h-4 w-4" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => void recorder.startRecording()}
+                  disabled={uploading || recorder.status === 'requesting'}
+                  aria-label="Start recording"
+                  className="group relative flex h-[52px] items-center gap-2.5 rounded-full bg-[var(--vermilion)] pl-4 pr-5 text-white shadow-[0_2px_10px_rgba(229,72,77,0.28)] hover:bg-[var(--vermilion-hover)] active:scale-[0.98] transition-all disabled:opacity-60 cursor-pointer shrink-0"
+                >
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full border border-white/45">
+                    <span className="h-2.5 w-2.5 rounded-full bg-white" />
+                  </span>
+                  <span className="text-[14px] font-medium tracking-[-0.01em]">Record</span>
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -1088,7 +1278,7 @@ export default function App() {
       {/* RIGHT PANE: Calm Editorial Detail View */}
       <main
         className={[
-          'flex-1 flex flex-col min-w-0 h-full bg-[var(--surface)] lg:bg-[var(--surface)]',
+          'flex-1 flex flex-col min-w-0 h-full bg-[var(--surface)]',
           mobileView === 'list' ? 'hidden lg:flex' : 'flex',
         ].join(' ')}
       >
@@ -1133,7 +1323,7 @@ export default function App() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => handleDelete(selectedRecording.id)}
+                      onClick={() => void handleDelete(selectedRecording.id)}
                       className="rounded-lg bg-[var(--vermilion)] px-2.5 py-1 text-[12px] font-medium text-white hover:bg-[var(--vermilion-hover)] cursor-pointer"
                     >
                       Delete
@@ -1173,18 +1363,17 @@ export default function App() {
 
                     <button
                       type="button"
-                      onClick={() => void handleDownloadAudio()}
-                      disabled={!selectedRecording.audioUrl}
+                      onClick={handleDownloadAudio}
                       title="Download audio"
                       aria-label="Download audio"
-                      className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors disabled:opacity-40 cursor-pointer"
+                      className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
                     >
                       <FileAudio className="h-4 w-4" />
                     </button>
 
                     <button
                       type="button"
-                      onClick={() => handleReprocess(selectedRecording)}
+                      onClick={() => void handleReprocess(selectedRecording)}
                       disabled={selectedRecording.status === 'processing'}
                       title="Reprocess note"
                       aria-label="Reprocess note"
@@ -1253,7 +1442,7 @@ export default function App() {
                           ? 'Listening & organizing…'
                           : selectedRecording.title}
                       </h2>
-                      {selectedRecording.status === 'ready' && (
+                      {selectedRecording.status !== 'processing' && (
                         <Pencil className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)] opacity-0 group-hover:opacity-100 transition-opacity" />
                       )}
                     </button>
@@ -1267,7 +1456,7 @@ export default function App() {
                   )}
 
                   {/* Inline Editable Tags */}
-                  {selectedRecording.status === 'ready' && (
+                  {selectedRecording.status !== 'processing' && (
                     <div className="mt-4 flex flex-wrap items-center gap-1.5">
                       {selectedRecording.tags.map((tag) => (
                         <span
@@ -1277,7 +1466,7 @@ export default function App() {
                           <span>#{tag}</span>
                           <button
                             type="button"
-                            onClick={() => handleRemoveTag(selectedRecording.id, tag)}
+                            onClick={() => handleRemoveTag(selectedRecording, tag)}
                             aria-label={`Remove tag ${tag}`}
                             className="flex h-4 w-4 items-center justify-center rounded-full text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] cursor-pointer"
                           >
@@ -1322,10 +1511,31 @@ export default function App() {
                 </div>
 
                 {/* Clean Native Audio Playback Deck */}
-                <AudioPlayer
-                  recording={selectedRecording}
-                  isFixture={fixtureIdsRef.current.has(selectedRecording.id)}
-                />
+                <AudioPlayer recording={selectedRecording} />
+
+                {/* Failed Processing Banner */}
+                {selectedRecording.status === 'failed' && (
+                  <div className="rounded-2xl border border-[var(--border-strong)] bg-[var(--canvas)] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <p className="inline-flex items-center gap-2 text-[13.5px] font-medium text-[var(--ink)]">
+                        <AlertCircle className="h-4 w-4 text-[var(--vermilion)]" />
+                        Audio is saved, but transcription didn’t finish
+                      </p>
+                      <p className="text-[12.5px] text-[var(--ink-muted)]">
+                        {selectedRecording.errorMessage ||
+                          'Tap Retry processing to transcribe this audio clip.'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleReprocess(selectedRecording)}
+                      className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[var(--ink)] px-3.5 text-[12.5px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      Retry processing
+                    </button>
+                  </div>
+                )}
 
                 {/* Segmented Toggle: English / Original / Markdown */}
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
@@ -1395,8 +1605,8 @@ export default function App() {
                       Listening &amp; organizing…
                     </div>
                     <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
-                      Your audio is safely captured. Detecting language, transcribing, summarizing,
-                      and writing the Obsidian Markdown note.
+                      Your audio is safely saved on disk. Detecting language, transcribing,
+                      summarizing, and writing the Obsidian Markdown note.
                     </p>
                     <div className="space-y-2 pt-1">
                       <div className="shimmer-bar h-3.5 w-full rounded-full" />
@@ -1412,10 +1622,7 @@ export default function App() {
                     onCopy={() => void handleCopyMarkdown()}
                   />
                 ) : detailTab === 'original' && !selectedRecording.isEnglish ? (
-                  <section
-                    lang={selectedRecording.language}
-                    className="space-y-4 pt-1"
-                  >
+                  <section lang={selectedRecording.language} className="space-y-4 pt-1">
                     <p className="font-mono text-[11px] uppercase tracking-wider text-[var(--ink-muted)]">
                       Original · {selectedRecording.languageName}
                     </p>
@@ -1430,14 +1637,20 @@ export default function App() {
                   </section>
                 ) : (
                   <section className="space-y-4 pt-1">
-                    <div className="space-y-4 text-[15.5px] leading-[1.78] text-[var(--ink)]">
-                      {selectedRecording.englishTranscript
-                        .split(/\n{2,}/)
-                        .filter(Boolean)
-                        .map((para, idx) => (
-                          <p key={idx}>{para}</p>
-                        ))}
-                    </div>
+                    {selectedRecording.englishTranscript ? (
+                      <div className="space-y-4 text-[15.5px] leading-[1.78] text-[var(--ink)]">
+                        {selectedRecording.englishTranscript
+                          .split(/\n{2,}/)
+                          .filter(Boolean)
+                          .map((para, idx) => (
+                            <p key={idx}>{para}</p>
+                          ))}
+                      </div>
+                    ) : (
+                      <p className="text-[14px] text-[var(--ink-muted)]">
+                        No transcript yet.
+                      </p>
+                    )}
                   </section>
                 )}
               </article>

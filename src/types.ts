@@ -2,6 +2,7 @@ export type RecordingStatus = 'processing' | 'ready' | 'failed';
 
 export interface Recording {
   id: string;
+  filename?: string;
   title: string;
   created: string;
   durationSeconds: number;
