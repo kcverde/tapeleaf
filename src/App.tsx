@@ -990,6 +990,16 @@ export default function App() {
     );
   }, [recordings, selectedId, filteredRecordings]);
 
+  const tapeNumberById = useMemo(() => {
+    const map = new Map<string, number>();
+    // recordings are sorted newest-first; oldest tape is 001, newest is N
+    const total = recordings.length;
+    recordings.forEach((rec, index) => {
+      map.set(rec.id, total - index);
+    });
+    return map;
+  }, [recordings]);
+
   const pendingVaultCount = useMemo(() => {
     if (!vault) return 0;
     return recordings.filter((r) => needsVaultWrite(r, vault.vaultId)).length;
@@ -1009,18 +1019,18 @@ export default function App() {
         className="pointer-events-none fixed top-3 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-2"
       >
         {savedToast && (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--ink)] shadow-md">
-            <Check className="h-3.5 w-3.5" />
+          <span className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--deck-bg)] px-3 py-1.5 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--deck-ink)] shadow-lg">
+            <Check className="h-3.5 w-3.5 text-[var(--led-green)]" />
             {savedToast}
           </span>
         )}
         {canApplySwUpdate && (
-          <div className="pointer-events-auto flex items-center gap-2.5 rounded-full border border-[var(--border-strong)] bg-[var(--surface)] pl-3.5 pr-1.5 py-1 text-[12.5px] shadow-md">
+          <div className="pointer-events-auto flex items-center gap-2.5 rounded-md border border-[var(--border-strong)] bg-[var(--surface)] pl-3 pr-1.5 py-1 font-mono text-[11.5px] shadow-md">
             <span className="text-[var(--ink-secondary)]">New version ready</span>
             <button
               type="button"
               onClick={() => pendingSwUpdate?.applyUpdate()}
-              className="rounded-full bg-[var(--ink)] px-3 py-1 text-[12px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
+              className="rounded bg-[var(--ink)] px-2.5 py-1 font-mono text-[11px] font-bold uppercase tracking-wider text-[var(--surface)] hover:opacity-90 cursor-pointer"
             >
               Update
             </button>
@@ -1047,133 +1057,155 @@ export default function App() {
             mobileView === 'detail' ? 'hidden lg:flex' : 'flex',
           ].join(' ')}
         >
-          {/* Brand Header */}
-          <header className="flex items-center justify-between px-4 sm:px-5 pt-4 pb-3 shrink-0">
-            <div className="flex items-center gap-2.5">
+          {/* Machined Braun Brand Header */}
+          <header className="flex items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--panel)] px-4 h-14 shrink-0">
+            <div className="flex items-center gap-2.5 min-w-0">
               <TapeleafMark />
-              <div className="flex items-baseline gap-2">
-                <h1 className="text-[17.5px] font-semibold tracking-[-0.02em] text-[var(--ink)]">
-                  Tapeleaf
-                </h1>
-                <span className="text-[12.5px] font-mono tabular-nums text-[var(--ink-muted)]">
-                  {recordings.length}
-                </span>
-              </div>
+              <h1 className="text-[14.5px] font-bold uppercase tracking-[0.09em] text-[var(--ink)] truncate">
+                Tapeleaf
+              </h1>
             </div>
 
-            <div className="flex items-center gap-1">
-              {!isOnline && (
+            <div className="flex items-center gap-1.5 shrink-0">
+              {!isOnline ? (
                 <span
                   title="Offline — clips save locally and transcribe when back online"
-                  className="inline-flex items-center gap-1 rounded-full bg-[var(--surface-subtle)] px-2.5 py-1 text-[12px] font-medium text-[var(--ink-muted)]"
+                  className="inline-flex h-8 items-center gap-1.5 rounded border border-[var(--border-strong)] bg-[var(--surface)] px-2 font-mono text-[10.5px] font-bold uppercase tracking-wider text-[var(--ink-secondary)]"
                 >
-                  <WifiOff className="h-3 w-3" />
-                  Offline
+                  <WifiOff className="h-3 w-3 text-[var(--led-amber)]" />
+                  <span>Offline</span>
                 </span>
-              )}
+              ) : vault && vaultPermission === 'granted' ? (
+                <button
+                  type="button"
+                  onClick={() => setSettingsOpen(true)}
+                  title={`Obsidian vault connected: ${vault.folderName}`}
+                  className="inline-flex h-8 items-center gap-1.5 rounded border border-[var(--border-strong)] bg-[var(--surface)] px-2 font-mono text-[10.5px] font-bold uppercase tracking-wider text-[var(--ink-secondary)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+                >
+                  <span className="h-2 w-2 rounded-full bg-[var(--led-green)]" />
+                  <span>Vault</span>
+                </button>
+              ) : vault && vaultPermission === 'prompt' ? (
+                <button
+                  type="button"
+                  onClick={handleReconnectVaultInline}
+                  title={`Reconnect ${vault.folderName}`}
+                  className="inline-flex h-8 items-center gap-1.5 rounded border border-[var(--led-amber)]/60 bg-[var(--surface)] px-2 font-mono text-[10.5px] font-bold uppercase tracking-wider text-[var(--led-amber)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
+                >
+                  <span className="h-2 w-2 rounded-full bg-[var(--led-amber)]" />
+                  <span>Reconnect</span>
+                </button>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={toggleTheme}
+                aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                title={theme === 'dark' ? 'Alabaster light mode' : 'Obsidian dark mode'}
+                className="flex h-8 w-8 items-center justify-center rounded border border-[var(--border)] bg-[var(--surface)] text-[var(--ink-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+              >
+                {theme === 'dark' ? (
+                  <Sun className="h-4 w-4" />
+                ) : (
+                  <Moon className="h-4 w-4" />
+                )}
+              </button>
+
               <button
                 type="button"
                 onClick={() => setSettingsOpen(true)}
                 aria-label="Open settings"
                 title="Settings (Gemini key & Obsidian folder)"
-                className="relative flex h-10 w-10 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+                className="relative flex h-8 w-8 items-center justify-center rounded border border-[var(--border)] bg-[var(--surface)] text-[var(--ink-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--ink)] transition-colors cursor-pointer"
               >
-                <Settings className="h-[18px] w-[18px]" />
+                <Settings className="h-4 w-4" />
                 {(!geminiSettings.apiKey.trim() || (vault && vaultPermission === 'prompt')) && (
                   <span
                     aria-hidden="true"
-                    className="absolute top-2 right-2 h-2 w-2 rounded-full bg-[var(--vermilion)]"
+                    className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-[var(--vermilion)]"
                   />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={toggleTheme}
-                aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-                title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
-                className="flex h-10 w-10 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
-              >
-                {theme === 'dark' ? (
-                  <Sun className="h-[18px] w-[18px]" />
-                ) : (
-                  <Moon className="h-[18px] w-[18px]" />
                 )}
               </button>
             </div>
           </header>
 
           {/* Quiet Contextual Banners */}
-          <div className="px-4 sm:px-5 space-y-2 shrink-0">
-            {vault && vaultPermission === 'prompt' && (
-              <div className="mb-2 rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] px-3.5 py-2.5 text-[13px] space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="font-medium text-[var(--ink)] truncate">
-                      Reconnect {vault.folderName}
-                    </p>
-                    <p className="text-[12px] text-[var(--ink-muted)]">
-                      {pendingVaultCount > 0
-                        ? `${pendingVaultCount} ${pendingVaultCount === 1 ? 'note' : 'notes'} waiting to write`
-                        : 'Tap once to resume writing .md & audio'}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleReconnectVaultInline}
-                    className="shrink-0 inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-3 text-[12.5px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
-                  >
-                    <FolderOpen className="h-3.5 w-3.5" />
-                    Reconnect
-                  </button>
-                </div>
-                {vaultBannerError && (
-                  <div className="flex items-center justify-between gap-2 pt-1 text-[12px] text-[var(--vermilion)]">
-                    <span>{vaultBannerError}</span>
+          {((vault && vaultPermission === 'prompt') ||
+            (!vault && vaultBannerError) ||
+            queuePausedReason) && (
+            <div className="border-b border-[var(--border)] bg-[var(--panel)] px-4 py-2.5 space-y-2 shrink-0">
+              {vault && vaultPermission === 'prompt' && (
+                <div className="rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-2.5 text-[13px] space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-[var(--ink)] truncate">
+                        Reconnect {vault.folderName}
+                      </p>
+                      <p className="text-[12px] text-[var(--ink-muted)]">
+                        {pendingVaultCount > 0
+                          ? `${pendingVaultCount} ${pendingVaultCount === 1 ? 'note' : 'notes'} waiting to write`
+                          : 'Tap once to resume writing .md & audio'}
+                      </p>
+                    </div>
                     <button
                       type="button"
-                      onClick={handleConnectVaultInline}
-                      className="shrink-0 underline font-medium cursor-pointer"
+                      onClick={handleReconnectVaultInline}
+                      className="shrink-0 inline-flex min-h-[34px] items-center gap-1.5 rounded-md bg-[var(--ink)] px-3 font-mono text-[11px] font-bold uppercase tracking-wider text-[var(--surface)] hover:opacity-90 cursor-pointer"
                     >
-                      Choose folder
+                      <FolderOpen className="h-3.5 w-3.5" />
+                      Reconnect
                     </button>
                   </div>
-                )}
-              </div>
-            )}
+                  {vaultBannerError && (
+                    <div className="flex items-center justify-between gap-2 pt-1 text-[12px] text-[var(--vermilion)]">
+                      <span>{vaultBannerError}</span>
+                      <button
+                        type="button"
+                        onClick={handleConnectVaultInline}
+                        className="shrink-0 underline font-medium cursor-pointer"
+                      >
+                        Choose folder
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
 
-            {!vault && vaultBannerError && (
-              <div
-                role="alert"
-                className="mb-2 rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] px-3.5 py-2.5 text-[12.5px] flex items-center justify-between gap-2"
-              >
-                <span className="text-[var(--vermilion)] leading-snug">{vaultBannerError}</span>
-                <button
-                  type="button"
-                  onClick={() => setVaultBannerError(null)}
-                  className="shrink-0 text-[12px] font-medium text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer"
+              {!vault && vaultBannerError && (
+                <div
+                  role="alert"
+                  className="rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-2.5 text-[12.5px] flex items-center justify-between gap-2"
                 >
-                  Dismiss
-                </button>
-              </div>
-            )}
+                  <span className="text-[var(--vermilion)] leading-snug">{vaultBannerError}</span>
+                  <button
+                    type="button"
+                    onClick={() => setVaultBannerError(null)}
+                    className="shrink-0 font-mono text-[11px] font-semibold uppercase text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
 
-            {queuePausedReason && (
-              <div className="mb-2 rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] px-3.5 py-2.5 text-[12.5px] flex items-center justify-between gap-2">
-                <span className="text-[var(--vermilion)] leading-snug">{queuePausedReason}</span>
-                <button
-                  type="button"
-                  onClick={() => setSettingsOpen(true)}
-                  className="shrink-0 rounded-lg border border-[var(--border)] px-2.5 py-1 text-[12px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] cursor-pointer"
-                >
-                  Settings
-                </button>
-              </div>
-            )}
-          </div>
+              {queuePausedReason && (
+                <div className="rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-2.5 text-[12.5px] flex items-center justify-between gap-2">
+                  <span className="text-[var(--vermilion)] leading-snug">{queuePausedReason}</span>
+                  <button
+                    type="button"
+                    onClick={() => setSettingsOpen(true)}
+                    className="shrink-0 rounded border border-[var(--border-strong)] bg-[var(--canvas)] px-2.5 py-1 font-mono text-[11px] font-semibold uppercase text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer"
+                  >
+                    Settings
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           <LibraryPane
             recordings={recordings}
             filteredRecordings={filteredRecordings}
+            tapeNumberById={tapeNumberById}
             loadingLibrary={loadingLibrary}
             storageError={storageError}
             onRetryBoot={() => setBootAttempt((n) => n + 1)}
@@ -1200,6 +1232,7 @@ export default function App() {
         {/* Isolated Record Dock (owns useRecorder so live meter never re-renders the library) */}
         <RecordDock
           saving={saving}
+          nextTapeNumber={recordings.length + 1}
           vault={vault}
           vaultPermission={vaultPermission}
           unsavedCaptures={unsavedCaptures}
@@ -1214,7 +1247,7 @@ export default function App() {
         />
       </aside>
 
-      {/* RIGHT PANE: Calm Editorial Detail View */}
+      {/* RIGHT PANE: Braun Hardware Detail View */}
       <main
         className={[
           'flex-1 flex-col min-w-0 min-h-0 lg:h-full bg-[var(--surface)]',
@@ -1223,6 +1256,7 @@ export default function App() {
       >
         <DetailPane
           recording={selectedRecording}
+          tapeNumber={selectedRecording ? tapeNumberById.get(selectedRecording.id) : undefined}
           vault={vault}
           vaultPermission={vaultPermission}
           hasApiKey={Boolean(geminiSettings.apiKey.trim())}

@@ -1,45 +1,74 @@
 @import "tailwindcss";
 
 :root {
-  --canvas: #FAF9F7;
-  --surface: #FFFFFF;
-  --surface-subtle: #F1EFEA;
-  --surface-hover: #E7E3DC;
-  --border: #DDDAD5;
-  --border-strong: #BFB9B1;
-  --ink: #141210;
-  --ink-secondary: #44403C;
-  --ink-muted: #5E5853;
-  /* Accessible warm vermilion: ~5.0:1 contrast ratio with white text (WCAG AA) */
+  /* Braun / Field Recorder — Alabaster Light Chassis */
+  --canvas: #F2F0EC;
+  --panel: #EAE6DF;
+  --surface: #FAF9F6;
+  --surface-subtle: #E6E2DA;
+  --surface-hover: #DDD8CE;
+  --border: #D7D2C9;
+  --border-strong: #BEB8AD;
+  --ink: #171513;
+  --ink-secondary: #4A4640;
+  --ink-muted: #6E6860;
+
+  /* Hardware Signal LEDs */
   --vermilion: #D1383D;
   --vermilion-hover: #BC2D32;
   --vermilion-soft: rgba(209, 56, 61, 0.14);
-  --pill-active-bg: #141210;
-  --pill-active-ink: #FAF9F7;
-  --code-bg: #F4F2ED;
-  --shimmer-a: #ECE8E1;
-  --shimmer-b: #F8F7F4;
+  --led-green: #2B8A56;
+  --led-amber: #B86E10;
+
+  /* Tactile Dark Hardware Deck (constant dark anodized module in both themes) */
+  --deck-bg: #191715;
+  --deck-surface: #25221F;
+  --deck-surface-hover: #302C28;
+  --deck-border: #34302C;
+  --deck-ink: #FAF8F4;
+  --deck-muted: #9D968D;
+  --deck-wave-idle: #4D4944;
+
+  --pill-active-bg: #171513;
+  --pill-active-ink: #FAF9F6;
+  --code-bg: #EFECE6;
+  --shimmer-a: #E3DFD7;
+  --shimmer-b: #F4F2EE;
   color-scheme: light;
 }
 
 :root[data-theme="dark"] {
-  --canvas: #0E0E10;
-  --surface: #18181C;
-  --surface-subtle: #232329;
-  --surface-hover: #2E2E36;
-  --border: #32323A;
-  --border-strong: #4E4E5A;
-  --ink: #FAFAFA;
-  --ink-secondary: #E4E4E7;
-  --ink-muted: #B8B8C2;
-  --vermilion: #D1383D;
-  --vermilion-hover: #DE464B;
-  --vermilion-soft: rgba(209, 56, 61, 0.22);
-  --pill-active-bg: #FAFAFA;
-  --pill-active-ink: #0E0E10;
-  --code-bg: #141418;
-  --shimmer-a: #232329;
-  --shimmer-b: #2F2F37;
+  /* Braun / Field Recorder — Anodized Obsidian Dark Chassis */
+  --canvas: #121214;
+  --panel: #18181C;
+  --surface: #1B1B20;
+  --surface-subtle: #222228;
+  --surface-hover: #2C2C34;
+  --border: #2B2B32;
+  --border-strong: #3F3F49;
+  --ink: #F4F3EF;
+  --ink-secondary: #C8C6C0;
+  --ink-muted: #94928E;
+
+  --vermilion: #DC4247;
+  --vermilion-hover: #E75156;
+  --vermilion-soft: rgba(220, 66, 71, 0.22);
+  --led-green: #45B878;
+  --led-amber: #E29B34;
+
+  --deck-bg: #0A0A0C;
+  --deck-surface: #1A1A1F;
+  --deck-surface-hover: #25252C;
+  --deck-border: #2D2D35;
+  --deck-ink: #FAF9F6;
+  --deck-muted: #8C8A86;
+  --deck-wave-idle: #3A3A44;
+
+  --pill-active-bg: #F4F3EF;
+  --pill-active-ink: #121214;
+  --code-bg: #151519;
+  --shimmer-a: #222228;
+  --shimmer-b: #2E2E36;
   color-scheme: dark;
 }
 
@@ -73,7 +102,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Hide scrollbars cleanly for horizontal tag pills */
+/* Hide scrollbars cleanly for horizontal tag tabs */
 .no-scrollbar {
   -ms-overflow-style: none;
   scrollbar-width: none;
@@ -82,7 +111,7 @@
   display: none;
 }
 
-/* Calm editorial shimmer for processing state */
+/* Precision hairline shimmer for processing state */
 @keyframes tapeleaf-shimmer {
   0% {
     background-position: 200% 0;
@@ -103,14 +132,14 @@
   animation: tapeleaf-shimmer 2.1s ease-in-out infinite;
 }
 
-/* Subtle active recording pulse strictly on vermilion */
+/* Subtle active recording LED pulse strictly on vermilion */
 @keyframes record-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 var(--vermilion-soft);
+    box-shadow: 0 0 0 0 rgba(209, 56, 61, 0.45);
   }
   50% {
-    box-shadow: 0 0 0 8px rgba(209, 56, 61, 0);
+    box-shadow: 0 0 0 7px rgba(209, 56, 61, 0);
   }
 }
 
@@ -127,51 +156,17 @@
   }
 }
 
-/* Crisp custom range scrubber for native audio playback */
-input[type="range"].tapeleaf-scrubber {
-  -webkit-appearance: none;
-  appearance: none;
-  background: transparent;
-  cursor: pointer;
-}
-
-input[type="range"].tapeleaf-scrubber::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 9999px;
-}
-
-input[type="range"].tapeleaf-scrubber::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 14px;
-  height: 14px;
-  border-radius: 9999px;
-  background: var(--ink);
-  border: 2px solid var(--surface);
-  margin-top: -5px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
-  transition: transform 120ms ease;
-}
-
-input[type="range"].tapeleaf-scrubber:hover::-webkit-slider-thumb {
-  transform: scale(1.12);
-}
-
-input[type="range"].tapeleaf-scrubber::-moz-range-track {
-  height: 4px;
-  border-radius: 9999px;
-  background: var(--border-strong);
-}
-
-input[type="range"].tapeleaf-scrubber::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 9999px;
-  background: var(--ink);
-  border: 2px solid var(--surface);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+/* Tactile machined key top highlight for primary REC / STOP hardware triggers */
+.hardware-rec-key {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 3px 10px rgba(209, 56, 61, 0.34);
 }
 
 .safe-bottom {
   padding-bottom: max(0.875rem, env(safe-area-inset-bottom));
+}
+
+.safe-top {
+  padding-top: max(0.75rem, env(safe-area-inset-top));
 }

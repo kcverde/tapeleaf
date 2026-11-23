@@ -295,10 +295,13 @@ export function SettingsModal({
     >
       <div
         ref={dialogRef}
-        className="w-full sm:max-w-[480px] max-h-[90dvh] overflow-y-auto rounded-t-3xl sm:rounded-3xl border border-[var(--border)] bg-[var(--surface)] text-[var(--ink)] shadow-2xl"
+        className="w-full sm:max-w-[480px] max-h-[90dvh] overflow-y-auto rounded-t-2xl sm:rounded-xl border border-[var(--border-strong)] bg-[var(--surface)] text-[var(--ink)] shadow-2xl"
       >
-        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-[var(--border)] bg-[var(--surface)]/95 backdrop-blur-md px-5 py-4">
-          <h2 id="tapeleaf-settings-title" className="text-[17px] font-semibold tracking-[-0.015em]">
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-[var(--border)] bg-[var(--panel)] px-5 h-14">
+          <h2
+            id="tapeleaf-settings-title"
+            className="font-mono text-[12.5px] font-bold uppercase tracking-[0.1em] text-[var(--ink)]"
+          >
             Settings
           </h2>
           <button
@@ -306,7 +309,7 @@ export function SettingsModal({
             type="button"
             onClick={onClose}
             aria-label="Close settings"
-            className="flex h-10 w-10 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer"
+            className="flex h-8 w-8 items-center justify-center rounded border border-[var(--border)] bg-[var(--surface)] text-[var(--ink-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--ink)] cursor-pointer"
           >
             <X className="h-4 w-4" />
           </button>
@@ -314,26 +317,26 @@ export function SettingsModal({
 
         <div className="p-5 space-y-6">
           {/* Obsidian Vault Folder Section */}
-          <section className="space-y-3">
+          <section className="space-y-2.5">
             <div className="flex items-center gap-2">
-              <FolderCheck className="h-4 w-4 text-[var(--ink-muted)]" />
-              <h3 className="text-[14.5px] font-semibold text-[var(--ink)]">
+              <FolderCheck className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
+              <h3 className="font-mono text-[11.5px] font-bold uppercase tracking-[0.08em] text-[var(--ink-secondary)]">
                 Obsidian Vault Folder
               </h3>
             </div>
 
             {vaultPermission === 'unsupported' ? (
-              <p className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] p-3.5 text-[13.5px] leading-relaxed text-[var(--ink-secondary)]">
+              <p className="rounded-lg border border-[var(--border)] bg-[var(--canvas)] p-3.5 text-[13px] leading-relaxed text-[var(--ink-secondary)]">
                 Direct folder writing requires Chrome on Android (v132+) or Desktop Chrome/Edge.
                 You can still use <strong>Copy MD</strong>, <strong>Download .md</strong>, and{' '}
                 <strong>Download Audio</strong> (saved under the embedded filename for Obsidian).
               </p>
             ) : (
-              <div className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] p-4 space-y-3">
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--canvas)] p-4 space-y-3">
                 {vault ? (
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <p className="text-[14px] font-medium text-[var(--ink)] truncate">
+                      <p className="text-[14px] font-semibold text-[var(--ink)] truncate">
                         {vault.folderName}
                       </p>
                       <p className="mt-0.5 text-[12.5px] text-[var(--ink-muted)]">
@@ -346,22 +349,30 @@ export function SettingsModal({
                     </div>
                     <span
                       className={[
-                        'shrink-0 rounded-full px-2.5 py-0.5 text-[11.5px] font-medium',
+                        'shrink-0 inline-flex items-center gap-1.5 rounded border px-2 py-0.5 font-mono text-[10.5px] font-bold uppercase tracking-wider',
                         vaultPermission === 'granted'
-                          ? 'bg-[var(--surface-subtle)] text-[var(--ink)]'
-                          : 'bg-[var(--vermilion-soft)] text-[var(--vermilion)]',
+                          ? 'border-[var(--border-strong)] bg-[var(--surface)] text-[var(--led-green)]'
+                          : 'border-[var(--led-amber)]/50 bg-[var(--surface)] text-[var(--led-amber)]',
                       ].join(' ')}
                     >
+                      <span
+                        className={[
+                          'h-1.5 w-1.5 rounded-full',
+                          vaultPermission === 'granted'
+                            ? 'bg-[var(--led-green)]'
+                            : 'bg-[var(--led-amber)]',
+                        ].join(' ')}
+                      />
                       {vaultPermission === 'granted' ? 'Connected' : 'Reconnect'}
                     </span>
                   </div>
                 ) : (
-                  <p className="text-[13.5px] leading-relaxed text-[var(--ink-secondary)]">
+                  <p className="text-[13px] leading-relaxed text-[var(--ink-secondary)]">
                     Connect a subfolder (like{' '}
-                    <code className="font-mono text-[12.5px]">Tapeleaf</code>) inside your Obsidian
+                    <code className="font-mono text-[12px]">Tapeleaf</code>) inside your Obsidian
                     vault stored in <strong>Device storage</strong>. Tapeleaf writes both the{' '}
-                    <code className="font-mono text-[12.5px]">.md</code> note and{' '}
-                    <code className="font-mono text-[12.5px]">audio/</code> clip directly there so{' '}
+                    <code className="font-mono text-[12px]">.md</code> note and{' '}
+                    <code className="font-mono text-[12px]">audio/</code> clip directly there so{' '}
                     <strong>Obsidian Sync</strong> syncs both automatically.
                   </p>
                 )}
@@ -372,9 +383,9 @@ export function SettingsModal({
                       type="button"
                       disabled={vaultBusy}
                       onClick={() => void runVaultAction(onReconnectVault, 'Vault reconnected.')}
-                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-3.5 text-[13px] font-medium text-[var(--canvas)] hover:opacity-90 disabled:opacity-50 cursor-pointer"
+                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md bg-[var(--ink)] px-3.5 font-mono text-[11.5px] font-bold uppercase tracking-wider text-[var(--surface)] hover:opacity-90 disabled:opacity-50 cursor-pointer"
                     >
-                      <FolderOpen className="h-4 w-4" />
+                      <FolderOpen className="h-3.5 w-3.5" />
                       Reconnect folder
                     </button>
                   )}
@@ -384,14 +395,14 @@ export function SettingsModal({
                     disabled={vaultBusy}
                     onClick={() => void runVaultAction(onConnectVault, 'Vault folder connected.')}
                     className={[
-                      'inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 text-[13px] font-medium transition-colors disabled:opacity-50 cursor-pointer',
+                      'inline-flex min-h-[38px] items-center gap-1.5 rounded-md px-3.5 font-mono text-[11.5px] font-bold uppercase tracking-wider transition-colors disabled:opacity-50 cursor-pointer',
                       !vault
-                        ? 'bg-[var(--ink)] text-[var(--canvas)] hover:opacity-90'
-                        : 'border border-[var(--border)] bg-[var(--surface)] text-[var(--ink)] hover:bg-[var(--surface-subtle)]',
+                        ? 'bg-[var(--ink)] text-[var(--surface)] hover:opacity-90'
+                        : 'border border-[var(--border-strong)] bg-[var(--surface)] text-[var(--ink)] hover:bg-[var(--surface-hover)]',
                     ].join(' ')}
                   >
-                    <FolderOpen className="h-4 w-4" />
-                    {vault ? 'Change folder' : 'Connect vault folder'}
+                    <FolderOpen className="h-3.5 w-3.5" />
+                    {vault ? 'Change folder' : 'Connect vault'}
                   </button>
 
                   {vault && vaultPermission === 'granted' && (
@@ -401,7 +412,7 @@ export function SettingsModal({
                       onClick={() =>
                         void runVaultAction(onSyncVaultNow, 'Vault write check complete.')
                       }
-                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] disabled:opacity-50 cursor-pointer"
+                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3.5 font-mono text-[11.5px] font-bold uppercase tracking-wider text-[var(--ink)] hover:bg-[var(--surface-hover)] disabled:opacity-50 cursor-pointer"
                     >
                       <RefreshCw className={`h-3.5 w-3.5 ${vaultBusy ? 'animate-spin' : ''}`} />
                       Write pending
@@ -415,7 +426,7 @@ export function SettingsModal({
                       onClick={() =>
                         void runVaultAction(onDisconnectVault, 'Disconnected vault folder.')
                       }
-                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3 text-[13px] font-medium text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--vermilion)] disabled:opacity-50 cursor-pointer"
+                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md px-3 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--vermilion)] disabled:opacity-50 cursor-pointer"
                     >
                       <Unlink className="h-3.5 w-3.5" />
                       Disconnect
@@ -438,37 +449,39 @@ export function SettingsModal({
           </section>
 
           {/* Gemini API Key Section */}
-          <section className="space-y-3">
+          <section className="space-y-2.5">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <KeyRound className="h-4 w-4 text-[var(--ink-muted)]" />
-                <h3 className="text-[14.5px] font-semibold text-[var(--ink)]">Gemini API</h3>
+                <KeyRound className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
+                <h3 className="font-mono text-[11.5px] font-bold uppercase tracking-[0.08em] text-[var(--ink-secondary)]">
+                  Gemini API
+                </h3>
               </div>
               <a
                 href="https://aistudio.google.com/apikey"
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-1 text-[12.5px] text-[var(--ink-muted)] hover:text-[var(--ink)]"
+                className="inline-flex items-center gap-1 font-mono text-[11px] uppercase tracking-wider text-[var(--ink-muted)] hover:text-[var(--ink)]"
               >
-                Get API key
+                Get key
                 <ExternalLink className="h-3 w-3" />
               </a>
             </div>
 
-            <div className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] p-4 space-y-4">
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--canvas)] p-4 space-y-4">
               {hasSavedKey && !editingKey ? (
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)]/75 px-3.5 py-2.5">
+                  <div className="flex items-center justify-between gap-3 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3.5 py-2.5">
                     <div className="min-w-0">
                       <p className="font-mono text-[13px] text-[var(--ink-secondary)] truncate">
                         {maskApiKey(apiKey)}
                       </p>
                       <p className="mt-0.5 inline-flex items-center gap-1 text-[12px] text-[var(--ink-muted)]">
-                        <Check className="h-3 w-3 text-[var(--ink)]" />
+                        <Check className="h-3 w-3 text-[var(--led-green)]" />
                         {rememberKey ? 'Saved on this device' : 'In memory for this session only'}
                       </p>
                     </div>
-                    <span className="shrink-0 rounded-full bg-[var(--surface)] border border-[var(--border)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--ink)]">
+                    <span className="shrink-0 rounded border border-[var(--border-strong)] bg-[var(--panel)] px-2 py-0.5 font-mono text-[10.5px] font-bold uppercase tracking-wider text-[var(--ink)]">
                       Saved
                     </span>
                   </div>
@@ -495,7 +508,7 @@ export function SettingsModal({
                       type="button"
                       onClick={() => void handleTestKey(apiKey, false)}
                       disabled={testingKey}
-                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] disabled:opacity-45 cursor-pointer"
+                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3 font-mono text-[11px] font-bold uppercase tracking-wider text-[var(--ink)] hover:bg-[var(--surface-hover)] disabled:opacity-45 cursor-pointer"
                     >
                       <RefreshCw className={`h-3.5 w-3.5 ${testingKey ? 'animate-spin' : ''}`} />
                       Test key
@@ -509,15 +522,15 @@ export function SettingsModal({
                         setKeyFeedback(null);
                         setEditingKey(true);
                       }}
-                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] cursor-pointer"
+                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3 font-mono text-[11px] font-bold uppercase tracking-wider text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer"
                     >
                       <Pencil className="h-3.5 w-3.5" />
-                      Change key
+                      Change
                     </button>
                     <button
                       type="button"
                       onClick={handleClearKey}
-                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-3 text-[13px] font-medium text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--vermilion)] cursor-pointer"
+                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md px-3 font-mono text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--vermilion)] cursor-pointer"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                       Clear
@@ -549,13 +562,13 @@ export function SettingsModal({
                         placeholder="AIza..."
                         autoComplete="off"
                         spellCheck={false}
-                        className="h-11 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] pl-3.5 pr-11 font-mono text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--border-strong)] focus:outline-none"
+                        className="h-10 w-full rounded-md border border-[var(--border-strong)] bg-[var(--surface)] pl-3 pr-10 font-mono text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--ink)] focus:outline-none"
                       />
                       <button
                         type="button"
                         onClick={() => setShowKey((s) => !s)}
                         aria-label={showKey ? 'Hide API key' : 'Show API key'}
-                        className="absolute right-2 flex h-8 w-8 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer"
+                        className="absolute right-1.5 flex h-8 w-8 items-center justify-center rounded text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer"
                       >
                         {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                       </button>
@@ -583,16 +596,16 @@ export function SettingsModal({
                       type="button"
                       onClick={handleSaveNewKey}
                       disabled={!keyDraft.trim()}
-                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-4 text-[13px] font-medium text-[var(--canvas)] hover:opacity-90 disabled:opacity-40 cursor-pointer"
+                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md bg-[var(--ink)] px-4 font-mono text-[11.5px] font-bold uppercase tracking-wider text-[var(--surface)] hover:opacity-90 disabled:opacity-40 cursor-pointer"
                     >
-                      <Check className="h-4 w-4" />
+                      <Check className="h-3.5 w-3.5" />
                       Save key
                     </button>
                     <button
                       type="button"
                       onClick={() => void handleTestKey(keyDraft, true)}
                       disabled={testingKey || !keyDraft.trim()}
-                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] disabled:opacity-40 cursor-pointer"
+                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3.5 font-mono text-[11.5px] font-bold uppercase tracking-wider text-[var(--ink)] hover:bg-[var(--surface-hover)] disabled:opacity-40 cursor-pointer"
                     >
                       <RefreshCw className={`h-3.5 w-3.5 ${testingKey ? 'animate-spin' : ''}`} />
                       Test &amp; Save
@@ -606,7 +619,7 @@ export function SettingsModal({
                           setEditingKey(false);
                           setKeyFeedback(null);
                         }}
-                        className="inline-flex min-h-[40px] items-center rounded-xl px-3 text-[13px] font-medium text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer"
+                        className="inline-flex min-h-[38px] items-center rounded-md px-3 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer"
                       >
                         Cancel
                       </button>
@@ -623,7 +636,7 @@ export function SettingsModal({
                     keyFeedback.ok ? 'text-[var(--ink-secondary)]' : 'text-[var(--vermilion)]',
                   ].join(' ')}
                 >
-                  {keyFeedback.ok && <Check className="h-3.5 w-3.5 shrink-0" />}
+                  {keyFeedback.ok && <Check className="h-3.5 w-3.5 shrink-0 text-[var(--led-green)]" />}
                   {keyFeedback.text}
                 </p>
               )}
@@ -631,7 +644,7 @@ export function SettingsModal({
               <div className="border-t border-[var(--border)] pt-3.5 space-y-2">
                 <label
                   htmlFor="tapeleaf-model"
-                  className="block text-[13px] font-medium text-[var(--ink-secondary)]"
+                  className="block font-mono text-[11px] font-bold uppercase tracking-wider text-[var(--ink-secondary)]"
                 >
                   Model
                 </label>
@@ -639,7 +652,7 @@ export function SettingsModal({
                   id="tapeleaf-model"
                   value={model}
                   onChange={(e) => handleModelChange(e.target.value)}
-                  className="h-10 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 text-[13.5px] text-[var(--ink)] focus:border-[var(--border-strong)] focus:outline-none"
+                  className="h-10 w-full rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3 text-[13px] text-[var(--ink)] focus:border-[var(--ink)] focus:outline-none"
                 >
                   {modelOptions.map((m) => (
                     <option key={m.id} value={m.id}>
@@ -659,22 +672,22 @@ export function SettingsModal({
           {/* Local Storage & Offline Status */}
           <section className="space-y-2">
             <div className="flex items-center gap-2">
-              <HardDrive className="h-4 w-4 text-[var(--ink-muted)]" />
-              <h3 className="text-[14.5px] font-semibold text-[var(--ink)]">
+              <HardDrive className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
+              <h3 className="font-mono text-[11.5px] font-bold uppercase tracking-[0.08em] text-[var(--ink-secondary)]">
                 On-Device Storage &amp; Offline
               </h3>
             </div>
-            <div className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] px-4 py-3 flex items-center justify-between gap-3 text-[13px] text-[var(--ink-secondary)]">
-              <span>
-                {recordingCount} local {recordingCount === 1 ? 'note' : 'notes'}
-                {storageStats ? ` · ${formatBytes(storageStats.usageBytes)} used` : ''}
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--canvas)] px-4 py-3 flex items-center justify-between gap-3 text-[12.5px] text-[var(--ink-secondary)]">
+              <span className="font-mono">
+                {recordingCount} {recordingCount === 1 ? 'tape' : 'tapes'}
+                {storageStats ? ` · ${formatBytes(storageStats.usageBytes)}` : ''}
               </span>
-              <span className="font-mono text-[11.5px] text-[var(--ink-muted)]">
+              <span className="font-mono text-[11px] uppercase text-[var(--ink-muted)]">
                 {storageStats?.persisted ? 'Persistent' : 'Standard'}
                 {swStatus === 'ready'
                   ? ' · Offline ready'
                   : swStatus === 'error'
-                    ? ' · Offline cache unavailable'
+                    ? ' · Cache unavailable'
                     : ''}
               </span>
             </div>

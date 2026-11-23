@@ -200,3 +200,97 @@ export async function readAudioDuration(
     audio.src = url;
   });
 }
+
+/**
+ * Deterministic calm fallback waveform bars derived from a recording ID,
+ * used while decoding audio peaks or if a codec cannot be decoded via Web Audio.
+ */
+export function deterministicWaveformFallback(seed: string, barCount = 42): number[] {
+  let hash = 2166136261;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  const bars: number[] = [];
+  for (let i = 0; i < barCount; i += 1) {
+    hash ^= hash << 13;
+    hash ^= hash >>> 17;
+    hash ^= hash << 5;
+    const raw = (hash >>> 0) / 0xffffffff;
+    // Gentle voice-like contour: quieter at edges, varied cadence in middle
+    const env = Math.sin(((i + 1) / (barCount + 1)) * Math.PI);
+    const val = 0.2 + raw * 0.65 * (0.55 + 0.45 * env);
+    bars.push(Math.max(0.18, Math.min(0.96, val)));
+  }
+  return bars;
+}
+
+const MAX_WAVEFORM_DECODE_BYTES = 25 * 1024 * 1024; // Avoid decoding huge files into PCM RAM
+
+/**
+ * Decodes real normalized RMS amplitude bars from an audio Blob via Web Audio API.
+ * Falls back cleanly to a deterministic contour if Web Audio cannot decode the blob.
+ */
+export async function extractWaveformPeaks(
+  blob: Blob,
+  seed: string,
+  barCount = 42,
+): Promise<number[]> {
+  const fallback = deterministicWaveformFallback(seed, barCount);
+  if (
+    typeof window === 'undefined' ||
+    blob.size <= 0 ||
+    blob.size > MAX_WAVEFORM_DECODE_BYTES
+  ) {
+    return fallback;
+  }
+
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtx) return fallback;
+
+  let ctx: AudioContext | null = null;
+  try {
+    const buffer = await blob.arrayBuffer();
+    ctx = new AudioCtx();
+    const decoded = await ctx.decodeAudioData(buffer.slice(0));
+    const channel = decoded.getChannelData(0);
+    if (!channel || channel.length === 0) return fallback;
+
+    const blockSize = Math.max(1, Math.floor(channel.length / barCount));
+    const rawPeaks: number[] = [];
+    let maxPeak = 0;
+
+    for (let i = 0; i < barCount; i += 1) {
+      const start = i * blockSize;
+      const end = Math.min(channel.length, start + blockSize);
+      // Sample evenly across large blocks so decoding long clips stays instant
+      const stride = Math.max(1, Math.floor((end - start) / 256));
+      let sumSq = 0;
+      let count = 0;
+      for (let j = start; j < end; j += stride) {
+        const s = channel[j];
+        sumSq += s * s;
+        count += 1;
+      }
+      const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
+      rawPeaks.push(rms);
+      if (rms > maxPeak) maxPeak = rms;
+    }
+
+    if (maxPeak <= 0.0001) return fallback;
+
+    return rawPeaks.map((v) => {
+      // Mild power curve keeps quiet speech legible without squashing peaks
+      const norm = Math.pow(v / maxPeak, 0.72);
+      return Math.max(0.16, Math.min(1, norm));
+    });
+  } catch {
+    return fallback;
+  } finally {
+    if (ctx) {
+      void ctx.close().catch(() => {});
+    }
+  }
+}

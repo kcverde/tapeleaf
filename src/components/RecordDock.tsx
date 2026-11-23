@@ -20,6 +20,7 @@ import {
 import type { VaultPermissionState } from '../lib/vaultSync';
 import { formatDuration, formatTimerMs } from '../markdown';
 import type { CapturedAudio, RecoverableDraft, StoredVaultHandle } from '../types';
+import { formatTapeIndex } from './LibraryPane';
 
 export interface UnsavedCapture {
   id: string;
@@ -29,6 +30,7 @@ export interface UnsavedCapture {
 
 interface RecordDockProps {
   saving: boolean;
+  nextTapeNumber: number;
   vault: StoredVaultHandle | null;
   vaultPermission: VaultPermissionState;
   unsavedCaptures: UnsavedCapture[];
@@ -42,8 +44,15 @@ interface RecordDockProps {
 
 const DISCARD_CONFIRM_THRESHOLD_MS = 3000;
 
+function splitTimerTenths(formatted: string): { main: string; tenths: string } {
+  const dot = formatted.lastIndexOf('.');
+  if (dot < 0) return { main: formatted, tenths: '' };
+  return { main: formatted.slice(0, dot), tenths: formatted.slice(dot) };
+}
+
 export function RecordDock({
   saving,
+  nextTapeNumber,
   vault,
   vaultPermission,
   unsavedCaptures,
@@ -120,22 +129,61 @@ export function RecordDock({
     });
   };
 
+  const timerParts = splitTimerTenths(formatTimerMs(recorder.elapsedMs));
+  const codecLabel = formatCodecLabel(recorder.supportedMimeType);
+  const tapeLabel = `TAPE ${formatTapeIndex(nextTapeNumber)}`;
+
+  const renderWaveformBars = (tall: boolean) => (
+    <div
+      className={[
+        'flex w-full items-center justify-between gap-[3px]',
+        tall ? 'h-20' : 'h-9',
+      ].join(' ')}
+      aria-hidden="true"
+    >
+      {recorder.levels.map((level, i) => {
+        const tailLen = recorder.levels.length;
+        const isRecent = i >= tailLen - 5 && recorder.status === 'recording';
+        const isMid = i >= Math.floor(tailLen * 0.35) && !isRecent;
+        const heightPct = Math.round(Math.max(14, Math.min(100, level * 100)));
+        return (
+          <span
+            key={i}
+            className="flex-1 rounded-[1.5px] transition-[height] duration-75"
+            style={{
+              height: `${heightPct}%`,
+              backgroundColor: isRecent
+                ? 'var(--vermilion)'
+                : isMid
+                  ? 'var(--deck-ink)'
+                  : 'var(--deck-wave-idle)',
+              opacity: recorder.status === 'paused' ? 0.42 : isRecent ? 1 : isMid ? 0.78 : 0.7,
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+
   return (
-    <div className="shrink-0 border-t border-[var(--border)] bg-[var(--canvas)]/95 backdrop-blur-md px-4 sm:px-5 pt-3 safe-bottom">
-      {/* Recovered interrupted recordings from a prior OS kill / crash */}
-      {recoveredDrafts.length > 0 && (
-        <div className="mb-3 space-y-2 max-h-48 overflow-y-auto">
+    <div className="shrink-0">
+      {/* Recovered interrupted recordings & unsaved captures stay above the dark hardware deck */}
+      {(recoveredDrafts.length > 0 ||
+        unsavedCaptures.length > 0 ||
+        recorder.error ||
+        importError) && (
+        <div className="border-t border-[var(--border)] bg-[var(--panel)] px-4 py-3 space-y-2.5 max-h-60 overflow-y-auto">
           {recoveredDrafts.map((item) => (
             <div
               key={item.draft.id}
-              className="rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] p-3 text-[13px]"
+              className="rounded-lg border border-[var(--border-strong)] bg-[var(--surface)] p-3 text-[13px]"
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-start gap-2">
                   <AlertCircle className="h-4 w-4 shrink-0 text-[var(--vermilion)] mt-0.5" />
                   <div>
-                    <p className="font-medium text-[var(--ink)]">
-                      Recovered recording ({formatDuration(item.draft.durationSeconds)})
+                    <p className="font-semibold text-[var(--ink)]">
+                      Recovered tape ({formatDuration(item.draft.durationSeconds)})
                     </p>
                     <p className="mt-0.5 text-[12px] text-[var(--ink-muted)]">
                       Captured before the app was closed. Save to library or download the audio.
@@ -146,7 +194,7 @@ export function RecordDock({
                   type="button"
                   onClick={() => void onRecoverDraftDiscard(item.draft.id)}
                   aria-label="Discard recovered recording"
-                  className="shrink-0 flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer"
+                  className="shrink-0 flex h-7 w-7 items-center justify-center rounded text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
@@ -156,7 +204,7 @@ export function RecordDock({
                   type="button"
                   onClick={() => void onRecoverDraftSave(item)}
                   disabled={saving}
-                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-3 text-[12.5px] font-medium text-[var(--canvas)] hover:opacity-90 disabled:opacity-50 cursor-pointer"
+                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md bg-[var(--ink)] px-3 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--surface)] hover:opacity-90 disabled:opacity-50 cursor-pointer"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
                   Save to library
@@ -170,30 +218,25 @@ export function RecordDock({
                       `tapeleaf-recovered-${stamp}.${item.draft.extension}`,
                     );
                   }}
-                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] px-3 text-[12.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer"
+                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--canvas)] px-3 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer"
                 >
                   <Download className="h-3.5 w-3.5" />
-                  Download Audio
+                  Download
                 </button>
               </div>
             </div>
           ))}
-        </div>
-      )}
 
-      {/* Unsaved captures (e.g. IndexedDB quota full) */}
-      {unsavedCaptures.length > 0 && (
-        <div className="mb-3 space-y-2 max-h-48 overflow-y-auto">
           {unsavedCaptures.map((item) => (
             <div
               key={item.id}
-              className="rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] p-3 text-[13px]"
+              className="rounded-lg border border-[var(--border-strong)] bg-[var(--surface)] p-3 text-[13px]"
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-start gap-2">
                   <AlertCircle className="h-4 w-4 shrink-0 text-[var(--vermilion)] mt-0.5" />
                   <div>
-                    <p className="font-medium text-[var(--ink)]">
+                    <p className="font-semibold text-[var(--ink)]">
                       Unsaved clip ({formatDuration(item.captured.durationSeconds)})
                     </p>
                     <p className="mt-0.5 text-[12px] text-[var(--ink-muted)]">{item.error}</p>
@@ -203,7 +246,7 @@ export function RecordDock({
                   type="button"
                   onClick={() => onDismissUnsaved(item.id)}
                   aria-label="Discard unsaved clip"
-                  className="shrink-0 flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer"
+                  className="shrink-0 flex h-7 w-7 items-center justify-center rounded text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
@@ -213,7 +256,7 @@ export function RecordDock({
                   type="button"
                   onClick={() => void onCaptureReady(item.captured, item.id)}
                   disabled={saving}
-                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-3 text-[12.5px] font-medium text-[var(--canvas)] hover:opacity-90 disabled:opacity-50 cursor-pointer"
+                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md bg-[var(--ink)] px-3 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--surface)] hover:opacity-90 disabled:opacity-50 cursor-pointer"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
                   Retry save
@@ -227,36 +270,36 @@ export function RecordDock({
                       `tapeleaf-unsaved-${stamp}.${item.captured.extension}`,
                     );
                   }}
-                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] px-3 text-[12.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer"
+                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--canvas)] px-3 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer"
                 >
                   <Download className="h-3.5 w-3.5" />
-                  Download Audio
+                  Download
                 </button>
               </div>
             </div>
           ))}
-        </div>
-      )}
 
-      {(recorder.error || importError) && (
-        <div
-          role="alert"
-          className="mb-3 rounded-xl border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-2.5 text-[12.5px] text-[var(--ink-secondary)]"
-        >
-          <div className="flex items-start justify-between gap-2">
-            <p className="leading-snug">{importError || recorder.error}</p>
-            <button
-              type="button"
-              onClick={() => {
-                setImportError(null);
-                recorder.clearError();
-              }}
-              aria-label="Dismiss notice"
-              className="shrink-0 flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer"
+          {(recorder.error || importError) && (
+            <div
+              role="alert"
+              className="rounded-lg border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-2.5 text-[12.5px] text-[var(--ink-secondary)]"
             >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
+              <div className="flex items-start justify-between gap-2">
+                <p className="leading-snug">{importError || recorder.error}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setImportError(null);
+                    recorder.clearError();
+                  }}
+                  aria-label="Dismiss notice"
+                  className="shrink-0 flex h-7 w-7 items-center justify-center rounded text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -269,43 +312,46 @@ export function RecordDock({
       />
 
       {isActiveRecording ? (
-        <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3.5 shadow-[0_2px_10px_rgba(0,0,0,0.04)]">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <span
-                className={[
-                  'h-2.5 w-2.5 rounded-full',
-                  recorder.status === 'recording'
-                    ? 'bg-[var(--vermilion)] record-pulse'
-                    : 'bg-[var(--ink-muted)]',
-                ].join(' ')}
-              />
-              <span className="font-mono text-[11.5px] font-medium uppercase tracking-wider text-[var(--ink-muted)]">
-                {recorder.status === 'recording'
-                  ? 'Recording'
-                  : recorder.status === 'stopping'
-                    ? 'Saving…'
-                    : 'Paused'}
-              </span>
-            </div>
+        <>
+          {/* MOBILE (< lg): Full-screen distraction-free Braun Live Capture Bay */}
+          <div
+            role="region"
+            aria-label="Live audio capture"
+            className="lg:hidden fixed inset-0 z-40 flex flex-col justify-between bg-[var(--deck-bg)] text-[var(--deck-ink)] px-5 safe-top safe-bottom"
+          >
+            {/* Top Hardware Status Bar */}
+            <div className="flex items-center justify-between gap-3 border-b border-[var(--deck-border)] pb-3.5">
+              <div className="flex items-center gap-2.5">
+                <span
+                  className={[
+                    'h-2.5 w-2.5 rounded-full',
+                    recorder.status === 'recording'
+                      ? 'bg-[var(--vermilion)] record-pulse'
+                      : 'bg-[var(--deck-muted)]',
+                  ].join(' ')}
+                />
+                <span className="font-mono text-[12px] font-bold uppercase tracking-[0.1em]">
+                  {recorder.status === 'recording'
+                    ? `REC · ${tapeLabel}`
+                    : recorder.status === 'stopping'
+                      ? 'SAVING TAPE…'
+                      : `PAUSED · ${tapeLabel}`}
+                </span>
+              </div>
 
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-[16px] font-medium tabular-nums text-[var(--ink)]">
-                {formatTimerMs(recorder.elapsedMs)}
-              </span>
               {confirmDiscard ? (
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1.5">
                   <button
                     type="button"
                     onClick={() => setConfirmDiscard(false)}
-                    className="rounded-lg px-2 py-1 text-[12px] font-medium text-[var(--ink-secondary)] hover:bg-[var(--surface-subtle)] cursor-pointer"
+                    className="rounded-md border border-[var(--deck-border)] bg-[var(--deck-surface)] px-3 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-[var(--deck-ink)] cursor-pointer"
                   >
                     Keep
                   </button>
                   <button
                     type="button"
                     onClick={handleRequestDiscard}
-                    className="rounded-lg bg-[var(--vermilion)] px-2 py-1 text-[12px] font-medium text-white hover:bg-[var(--vermilion-hover)] cursor-pointer"
+                    className="rounded-md bg-[var(--vermilion)] px-3 py-1.5 font-mono text-[11px] font-bold uppercase tracking-wider text-white cursor-pointer"
                   >
                     Discard
                   </button>
@@ -316,114 +362,225 @@ export function RecordDock({
                   disabled={recorder.status === 'stopping'}
                   onClick={handleRequestDiscard}
                   aria-label="Discard recording"
-                  title="Discard recording"
-                  className="flex h-9 w-9 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors disabled:opacity-40 cursor-pointer"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--deck-border)] bg-[var(--deck-surface)] px-3 font-mono text-[11px] font-semibold uppercase tracking-wider text-[var(--deck-muted)] hover:text-[var(--deck-ink)] disabled:opacity-40 cursor-pointer"
                 >
-                  <X className="h-4 w-4" />
+                  <X className="h-3.5 w-3.5" />
+                  Discard
                 </button>
               )}
             </div>
-          </div>
 
-          <div
-            className="my-3 flex h-8 items-center justify-between gap-[3px] px-0.5"
-            aria-hidden="true"
-          >
-            {recorder.levels.map((level, i) => {
-              const isRecent =
-                i >= recorder.levels.length - 4 && recorder.status === 'recording';
-              const heightPct = Math.round(Math.max(12, Math.min(100, level * 100)));
-              return (
-                <span
-                  key={i}
-                  className="flex-1 rounded-full transition-[height] duration-75"
-                  style={{
-                    height: `${heightPct}%`,
-                    backgroundColor: isRecent ? 'var(--vermilion)' : 'var(--border-strong)',
-                    opacity: recorder.status === 'paused' ? 0.45 : isRecent ? 0.95 : 0.75,
-                  }}
-                />
-              );
-            })}
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              disabled={recorder.status === 'stopping'}
-              onClick={
-                recorder.status === 'recording'
-                  ? recorder.pauseRecording
-                  : recorder.resumeRecording
-              }
-              className="flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] px-3 text-[14px] font-medium text-[var(--ink)] hover:bg-[var(--surface-hover)] transition-colors disabled:opacity-45 cursor-pointer"
-            >
-              {recorder.status === 'recording' ? (
-                <>
-                  <Pause className="h-4 w-4" />
-                  Pause
-                </>
-              ) : (
-                <>
-                  <Play className="h-4 w-4 fill-current" />
-                  Resume
-                </>
-              )}
-            </button>
-
-            <button
-              type="button"
-              disabled={recorder.status === 'stopping'}
-              onClick={() => void handleStopRecording()}
-              className="flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-[var(--vermilion)] px-3 text-[14px] font-medium text-white hover:bg-[var(--vermilion-hover)] transition-colors disabled:opacity-55 cursor-pointer"
-            >
-              <Square className="h-3.5 w-3.5 fill-current" />
-              {recorder.status === 'stopping' ? 'Finishing…' : 'Stop & Save'}
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="flex items-center justify-between gap-2.5">
-          <div className="min-w-0">
-            <p className="text-[13.5px] font-medium text-[var(--ink)]">
-              {saving
-                ? 'Saving audio…'
-                : recorder.status === 'requesting'
-                  ? 'Requesting mic…'
-                  : 'Ready to record'}
-            </p>
-            <p className="font-mono text-[11.5px] tracking-wide text-[var(--ink-muted)] truncate">
-              {formatCodecLabel(recorder.supportedMimeType)}
-              {vault && vaultPermission === 'granted'
-                ? ` · ${vault.folderName}`
-                : ' · On-device'}
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={saving || recorder.status === 'requesting'}
-              title="Import audio file"
-              aria-label="Import audio file"
-              className="flex h-11 w-11 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--ink-muted)] hover:border-[var(--border-strong)] hover:text-[var(--ink)] transition-colors disabled:opacity-50 cursor-pointer"
-            >
-              <Upload className="h-4 w-4" />
-            </button>
-
-            <button
-              type="button"
-              onClick={() => void recorder.startRecording()}
-              disabled={saving || recorder.status === 'requesting'}
-              aria-label="Start recording"
-              className="group relative flex h-[52px] items-center gap-2.5 rounded-full bg-[var(--vermilion)] pl-4 pr-5 text-white shadow-[0_2px_10px_rgba(209,56,61,0.28)] hover:bg-[var(--vermilion-hover)] active:scale-[0.98] transition-all disabled:opacity-60 cursor-pointer shrink-0"
-            >
-              <span className="flex h-5 w-5 items-center justify-center rounded-full border border-white/45">
-                <span className="h-2.5 w-2.5 rounded-full bg-white" />
+            {/* Center Precision Timer + Ruled Live Waveform */}
+            <div className="flex flex-col items-center gap-6 py-4">
+              <span className="rounded border border-[var(--deck-border)] bg-[var(--deck-surface)] px-3 py-1 font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--deck-muted)]">
+                {codecLabel} · DRAFT SAVED LOCALLY
               </span>
-              <span className="text-[15px] font-medium tracking-[-0.01em]">Record</span>
-            </button>
+
+              <div className="font-mono text-[56px] sm:text-[64px] font-medium leading-none tracking-[-0.03em] tabular-nums">
+                <span>{timerParts.main}</span>
+                {timerParts.tenths && (
+                  <span className="text-[40px] sm:text-[46px] text-[var(--vermilion)]">
+                    {timerParts.tenths}
+                  </span>
+                )}
+              </div>
+
+              <div className="w-full border-y border-[var(--deck-border)] py-5 space-y-2.5">
+                {renderWaveformBars(true)}
+                <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-wider text-[var(--deck-muted)]">
+                  <span>−15s</span>
+                  <span>−10s</span>
+                  <span>−5s</span>
+                  <span className="font-semibold text-[var(--vermilion)]">NOW</span>
+                </div>
+              </div>
+
+              <p className="max-w-[260px] text-center text-[13px] leading-relaxed text-[var(--deck-muted)]">
+                Safe offline. Auto-transcribes and writes to{' '}
+                {vault && vaultPermission === 'granted' ? vault.folderName : 'your library'} when
+                stopped.
+              </p>
+            </div>
+
+            {/* Bottom Full-Thumb Machined Transport Keys */}
+            <div className="grid grid-cols-[1fr_1.5fr] gap-3 pt-2">
+              <button
+                type="button"
+                disabled={recorder.status === 'stopping'}
+                onClick={
+                  recorder.status === 'recording'
+                    ? recorder.pauseRecording
+                    : recorder.resumeRecording
+                }
+                className="flex h-14 items-center justify-center gap-2 rounded-lg border border-[var(--deck-border)] bg-[var(--deck-surface)] px-3 font-mono text-[13px] font-bold uppercase tracking-wider text-[var(--deck-ink)] hover:bg-[var(--deck-surface-hover)] active:scale-[0.98] transition-all disabled:opacity-45 cursor-pointer"
+              >
+                {recorder.status === 'recording' ? (
+                  <>
+                    <Pause className="h-4 w-4" />
+                    Pause
+                  </>
+                ) : (
+                  <>
+                    <Play className="h-4 w-4 fill-current" />
+                    Resume
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                disabled={recorder.status === 'stopping'}
+                onClick={() => void handleStopRecording()}
+                className="hardware-rec-key flex h-14 items-center justify-center gap-2.5 rounded-lg bg-[var(--vermilion)] px-4 font-mono text-[13px] font-bold uppercase tracking-wider text-white hover:bg-[var(--vermilion-hover)] active:scale-[0.98] transition-all disabled:opacity-55 cursor-pointer"
+              >
+                <Square className="h-3.5 w-3.5 fill-current" />
+                {recorder.status === 'stopping' ? 'Saving…' : 'Stop & Save'}
+              </button>
+            </div>
+          </div>
+
+          {/* DESKTOP (lg+): Compact inline dark hardware capture deck inside left sidebar */}
+          <div className="hidden lg:block border-t border-[var(--deck-border)] bg-[var(--deck-bg)] text-[var(--deck-ink)] px-4 py-3.5 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span
+                  className={[
+                    'h-2.5 w-2.5 rounded-full',
+                    recorder.status === 'recording'
+                      ? 'bg-[var(--vermilion)] record-pulse'
+                      : 'bg-[var(--deck-muted)]',
+                  ].join(' ')}
+                />
+                <span className="font-mono text-[11px] font-bold uppercase tracking-[0.08em]">
+                  {recorder.status === 'recording'
+                    ? `REC · ${tapeLabel}`
+                    : recorder.status === 'stopping'
+                      ? 'SAVING…'
+                      : `PAUSED · ${tapeLabel}`}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[16px] font-medium tabular-nums">
+                  <span>{timerParts.main}</span>
+                  {timerParts.tenths && (
+                    <span className="text-[13px] text-[var(--vermilion)]">{timerParts.tenths}</span>
+                  )}
+                </span>
+                {confirmDiscard ? (
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDiscard(false)}
+                      className="rounded border border-[var(--deck-border)] bg-[var(--deck-surface)] px-2 py-1 font-mono text-[10.5px] font-semibold uppercase text-[var(--deck-ink)] cursor-pointer"
+                    >
+                      Keep
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleRequestDiscard}
+                      className="rounded bg-[var(--vermilion)] px-2 py-1 font-mono text-[10.5px] font-bold uppercase text-white cursor-pointer"
+                    >
+                      Discard
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={recorder.status === 'stopping'}
+                    onClick={handleRequestDiscard}
+                    aria-label="Discard recording"
+                    title="Discard recording"
+                    className="flex h-8 w-8 items-center justify-center rounded border border-[var(--deck-border)] bg-[var(--deck-surface)] text-[var(--deck-muted)] hover:text-[var(--deck-ink)] disabled:opacity-40 cursor-pointer"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="border-y border-[var(--deck-border)] py-2.5">
+              {renderWaveformBars(false)}
+            </div>
+
+            <div className="grid grid-cols-[1fr_1.4fr] gap-2">
+              <button
+                type="button"
+                disabled={recorder.status === 'stopping'}
+                onClick={
+                  recorder.status === 'recording'
+                    ? recorder.pauseRecording
+                    : recorder.resumeRecording
+                }
+                className="flex h-11 items-center justify-center gap-2 rounded-md border border-[var(--deck-border)] bg-[var(--deck-surface)] px-3 font-mono text-[11.5px] font-bold uppercase tracking-wider text-[var(--deck-ink)] hover:bg-[var(--deck-surface-hover)] transition-colors disabled:opacity-45 cursor-pointer"
+              >
+                {recorder.status === 'recording' ? (
+                  <>
+                    <Pause className="h-3.5 w-3.5" />
+                    Pause
+                  </>
+                ) : (
+                  <>
+                    <Play className="h-3.5 w-3.5 fill-current" />
+                    Resume
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                disabled={recorder.status === 'stopping'}
+                onClick={() => void handleStopRecording()}
+                className="hardware-rec-key flex h-11 items-center justify-center gap-2 rounded-md bg-[var(--vermilion)] px-3 font-mono text-[11.5px] font-bold uppercase tracking-wider text-white hover:bg-[var(--vermilion-hover)] transition-colors disabled:opacity-55 cursor-pointer"
+              >
+                <Square className="h-3 w-3 fill-current" />
+                {recorder.status === 'stopping' ? 'Finishing…' : 'Stop & Save'}
+              </button>
+            </div>
+          </div>
+        </>
+      ) : (
+        /* IDLE: Anchored Dark Hardware Transport Module */
+        <div className="border-t border-[var(--deck-border)] bg-[var(--deck-bg)] text-[var(--deck-ink)] px-4 pt-3 safe-bottom">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="font-mono text-[11.5px] font-semibold uppercase tracking-[0.06em] text-[var(--deck-ink)] truncate">
+                {saving
+                  ? 'SAVING TAPE…'
+                  : recorder.status === 'requesting'
+                    ? 'REQUESTING MIC…'
+                    : `READY · ${codecLabel}`}
+              </p>
+              <p className="mt-0.5 font-mono text-[11px] text-[var(--deck-muted)] truncate">
+                {vault && vaultPermission === 'granted'
+                  ? `Obsidian / ${vault.folderName}`
+                  : 'On-device storage'}
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={saving || recorder.status === 'requesting'}
+                title="Import audio file"
+                aria-label="Import audio file"
+                className="flex h-12 w-11 items-center justify-center rounded-lg border border-[var(--deck-border)] bg-[var(--deck-surface)] text-[var(--deck-ink)] hover:bg-[var(--deck-surface-hover)] active:scale-[0.98] transition-all disabled:opacity-50 cursor-pointer"
+              >
+                <Upload className="h-4 w-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => void recorder.startRecording()}
+                disabled={saving || recorder.status === 'requesting'}
+                aria-label="Start recording"
+                className="hardware-rec-key flex h-12 items-center gap-2.5 rounded-lg bg-[var(--vermilion)] px-5 font-mono text-[13px] font-bold uppercase tracking-[0.08em] text-white hover:bg-[var(--vermilion-hover)] active:scale-[0.98] transition-all disabled:opacity-60 cursor-pointer shrink-0"
+              >
+                <span className="h-2.5 w-2.5 rounded-full bg-white" />
+                <span>REC</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

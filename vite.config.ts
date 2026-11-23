@@ -21,8 +21,8 @@ export function buildWebManifest(base: string) {
     start_url: base,
     scope: base,
     display: 'standalone',
-    background_color: '#FAF9F7',
-    theme_color: '#1C1917',
+    background_color: '#F2F0EC',
+    theme_color: '#191715',
     icons: [
       {
         src: `${base}icons/icon-192.png`,

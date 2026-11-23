@@ -6,8 +6,8 @@ import {
   Copy,
   Download,
   FileAudio,
-  FolderCheck,
   FolderOpen,
+  MoreHorizontal,
   Pencil,
   Plus,
   RefreshCw,
@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { AudioPlayer } from './AudioPlayer';
+import { formatTapeIndex } from './LibraryPane';
 import { MarkdownPreview } from './MarkdownPreview';
 import { TapeleafMark } from './TapeleafMark';
 import { triggerDownload } from '../lib/audio';
@@ -72,7 +73,7 @@ function TranscriptContent({
 
   if (!hasSpeakers) {
     return (
-      <div className={`space-y-4 text-[17px] ${leadingClass} text-[var(--ink)]`}>
+      <div className={`space-y-4 text-[16.5px] ${leadingClass} text-[var(--ink)]`}>
         {blocks.map((block, idx) => (
           <p key={idx} className="whitespace-pre-line">
             {block.text}
@@ -83,7 +84,7 @@ function TranscriptContent({
   }
 
   return (
-    <div className={`space-y-5 text-[17px] ${leadingClass} text-[var(--ink)]`}>
+    <div className={`space-y-5 text-[16.5px] ${leadingClass} text-[var(--ink)]`}>
       {blocks.map((block, idx) => {
         if (!block.speaker) {
           return (
@@ -95,13 +96,13 @@ function TranscriptContent({
         const speakerIdx = speakerIndices.get(block.speaker.toLowerCase()) ?? 0;
         const dotClass = SPEAKER_DOT_STYLES[speakerIdx % SPEAKER_DOT_STYLES.length];
         return (
-          <div key={idx} className="space-y-1">
+          <div key={idx} className="space-y-1.5">
             <div className="inline-flex items-center gap-2">
               <span
                 aria-hidden="true"
                 className={`h-2 w-2 shrink-0 rounded-full ${dotClass}`}
               />
-              <span className="text-[12.5px] font-semibold tracking-tight text-[var(--ink-secondary)]">
+              <span className="font-mono text-[11px] font-bold uppercase tracking-[0.08em] text-[var(--ink-muted)]">
                 {block.speaker}
               </span>
             </div>
@@ -121,6 +122,7 @@ export interface DeleteRequestOutcome {
 
 interface DetailPaneProps {
   recording: Recording | null;
+  tapeNumber?: number;
   vault: StoredVaultHandle | null;
   vaultPermission: VaultPermissionState;
   hasApiKey: boolean;
@@ -144,6 +146,7 @@ interface DetailPaneProps {
 
 export function DetailPane({
   recording,
+  tapeNumber,
   vault,
   vaultPermission,
   hasApiKey,
@@ -169,6 +172,7 @@ export function DetailPane({
   const [titleDraft, setTitleDraft] = useState('');
   const [addingTag, setAddingTag] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
+  const [actionSheetOpen, setActionSheetOpen] = useState(false);
 
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [deleteAlsoFromVault, setDeleteAlsoFromVault] = useState(false);
@@ -199,6 +203,7 @@ export function DetailPane({
     setEditingTitle(false);
     setAddingTag(false);
     setTagDraft('');
+    setActionSheetOpen(false);
     setConfirmDeleteOpen(false);
     setDeleteAlsoFromVault(false);
     setConfirmForceModified(false);
@@ -207,6 +212,18 @@ export function DetailPane({
     setShareError(null);
     loadedAudioRef.current = null;
   }, [recording?.id]);
+
+  useEffect(() => {
+    if (!actionSheetOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setActionSheetOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [actionSheetOpen]);
 
   useEffect(() => {
     if (editingTitle) {
@@ -261,12 +278,15 @@ export function DetailPane({
 
   if (!recording) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
+      <div className="flex flex-1 flex-col items-center justify-center px-6 text-center bg-[var(--surface)]">
         <TapeleafMark />
-        <h2 className="mt-4 text-[17px] font-medium text-[var(--ink)]">
-          Tap Record to capture a thought
+        <p className="mt-4 font-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+          STANDBY · NO TAPE SELECTED
+        </p>
+        <h2 className="mt-2 text-[17px] font-semibold tracking-[-0.015em] text-[var(--ink)]">
+          Tap REC to capture a thought
         </h2>
-        <p className="mt-1.5 max-w-xs text-[14px] leading-relaxed text-[var(--ink-muted)]">
+        <p className="mt-1.5 max-w-xs text-[13.5px] leading-relaxed text-[var(--ink-muted)]">
           Zero server needed. Notes save on your device and write both Markdown and audio straight
           into your Obsidian vault folder.
         </p>
@@ -274,6 +294,7 @@ export function DetailPane({
     );
   }
 
+  const tapeCode = `TAPE ${formatTapeIndex(tapeNumber)}`;
   const selectedVaultExport = getVaultExportFor(recording, vault?.vaultId);
   const canDeleteFromVault =
     Boolean(vault) &&
@@ -400,6 +421,13 @@ export function DetailPane({
     }
   };
 
+  const openDeleteConfirmation = () => {
+    setActionSheetOpen(false);
+    setDeleteError(null);
+    setConfirmForceModified(false);
+    setConfirmDeleteOpen(true);
+  };
+
   const executeDelete = async (options: {
     alsoVault: boolean;
     forceDeleteModified?: boolean;
@@ -422,41 +450,50 @@ export function DetailPane({
     setConfirmForceModified(false);
   };
 
+  const audioExtLabel = (
+    recording.audioFilename.split('.').pop() || 'audio'
+  ).toUpperCase();
+
   return (
     <>
-      {/* Detail Utility Bar */}
-      <header className="shrink-0 flex items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--surface)]/92 backdrop-blur-md px-3.5 sm:px-6 h-14">
-        <div className="flex items-center gap-2 min-w-0">
+      {/* Machined Hardware Detail Header */}
+      <header className="shrink-0 flex items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--panel)] px-3.5 sm:px-6 h-14">
+        <div className="flex items-center gap-2.5 min-w-0">
           <button
             type="button"
             onClick={onBackToList}
             aria-label="Back to library"
-            className="lg:hidden flex h-11 items-center gap-1 rounded-xl pl-1.5 pr-2.5 text-[14px] font-medium text-[var(--ink-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer shrink-0"
+            className="lg:hidden inline-flex h-10 items-center gap-1.5 rounded-md pl-1 pr-2.5 font-mono text-[12px] font-bold uppercase tracking-wider text-[var(--ink)] hover:bg-[var(--surface-hover)] cursor-pointer shrink-0"
           >
             <ArrowLeft className="h-4 w-4" />
-            Notes
+            <span>Tapes</span>
           </button>
 
-          <span className="hidden sm:inline text-[13.5px] text-[var(--ink-muted)] truncate">
-            {formatFullTimestamp(recording.created)}
+          <span className="hidden lg:inline font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--ink-muted)] truncate">
+            {tapeCode} · {formatFullTimestamp(recording.created)}
           </span>
 
           {!recording.isEnglish && recording.status === 'ready' && (
-            <span className="hidden md:inline-flex items-center rounded-md bg-[var(--surface-subtle)] px-2 py-0.5 text-[12px] font-medium text-[var(--ink-secondary)] shrink-0">
-              {recording.languageName} → English
+            <span className="hidden lg:inline-flex items-center rounded border border-[var(--border-strong)] bg-[var(--surface)] px-2 py-0.5 font-mono text-[10.5px] font-semibold uppercase tracking-wider text-[var(--ink-secondary)] shrink-0">
+              {recording.languageName} → EN
             </span>
           )}
         </div>
+
+        {/* Mobile centered tape index */}
+        <span className="lg:hidden font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]">
+          {tapeCode}
+        </span>
 
         <div className="flex items-center gap-1.5 shrink-0">
           <button
             type="button"
             onClick={() => void handleCopyMarkdown()}
-            className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-2.5 sm:px-3 text-[13.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] transition-colors cursor-pointer"
+            className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-2.5 sm:px-3 font-mono text-[11px] font-bold uppercase tracking-wider text-[var(--ink)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
           >
             {copiedId === recording.id ? (
               <>
-                <Check className="h-3.5 w-3.5" />
+                <Check className="h-3.5 w-3.5 text-[var(--led-green)]" />
                 <span>Copied</span>
               </>
             ) : (
@@ -467,84 +504,98 @@ export function DetailPane({
             )}
           </button>
 
+          {/* Mobile overflow sheet trigger (keeps mobile header uncluttered) */}
           <button
             type="button"
-            onClick={handleDownloadMarkdown}
-            title={`Download ${selectedFilename}`}
-            className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-2.5 sm:px-3 text-[13.5px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] transition-colors cursor-pointer"
+            onClick={() => setActionSheetOpen(true)}
+            aria-label="More tape actions"
+            aria-expanded={actionSheetOpen}
+            className="sm:hidden flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border-strong)] bg-[var(--surface)] text-[var(--ink)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
           >
-            <Download className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
-            <span className="hidden sm:inline">.md</span>
+            <MoreHorizontal className="h-4 w-4" />
           </button>
 
-          {canShareFiles && (
+          {/* Desktop/tablet inline machined utility keys */}
+          <div className="hidden sm:flex items-center gap-1.5">
             <button
               type="button"
-              onClick={() => void handleShareAudio()}
-              title="Share audio file"
-              aria-label="Share audio file"
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+              onClick={handleDownloadMarkdown}
+              title={`Download ${selectedFilename}`}
+              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-2.5 font-mono text-[11px] font-bold uppercase tracking-wider text-[var(--ink)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
             >
-              <Share2 className="h-4 w-4" />
+              <Download className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
+              <span>.MD</span>
             </button>
-          )}
 
-          <button
-            type="button"
-            onClick={() => void handleDownloadAudio()}
-            title={`Download audio (${recording.audioFilename})`}
-            aria-label="Download audio"
-            className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors cursor-pointer"
-          >
-            <FileAudio className="h-4 w-4" />
-          </button>
+            {canShareFiles && (
+              <button
+                type="button"
+                onClick={() => void handleShareAudio()}
+                title="Share audio file"
+                aria-label="Share audio file"
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-[var(--ink-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+              >
+                <Share2 className="h-4 w-4" />
+              </button>
+            )}
 
-          <button
-            type="button"
-            onClick={() => void onReprocess(recording)}
-            disabled={recording.status === 'processing'}
-            title="Reprocess with Gemini"
-            aria-label="Reprocess with Gemini"
-            className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] transition-colors disabled:opacity-40 cursor-pointer"
-          >
-            <RefreshCw
-              className={[
-                'h-4 w-4',
-                recording.status === 'processing' ? 'animate-spin' : '',
-              ].join(' ')}
-            />
-          </button>
+            <button
+              type="button"
+              onClick={() => void handleDownloadAudio()}
+              title={`Download audio (${recording.audioFilename})`}
+              aria-label="Download audio"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-[var(--ink-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+            >
+              <FileAudio className="h-4 w-4" />
+            </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setDeleteError(null);
-              setConfirmForceModified(false);
-              setConfirmDeleteOpen((prev) => !prev);
-            }}
-            aria-expanded={confirmDeleteOpen}
-            title="Delete note"
-            aria-label="Delete note"
-            className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--vermilion)] transition-colors cursor-pointer"
-          >
-            <Trash2 className="h-4 w-4" />
-          </button>
+            <button
+              type="button"
+              onClick={() => void onReprocess(recording)}
+              disabled={recording.status === 'processing'}
+              title="Reprocess with Gemini"
+              aria-label="Reprocess with Gemini"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-[var(--ink-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--ink)] transition-colors disabled:opacity-40 cursor-pointer"
+            >
+              <RefreshCw
+                className={[
+                  'h-4 w-4',
+                  recording.status === 'processing' ? 'animate-spin' : '',
+                ].join(' ')}
+              />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setDeleteError(null);
+                setConfirmForceModified(false);
+                setConfirmDeleteOpen((prev) => !prev);
+              }}
+              aria-expanded={confirmDeleteOpen}
+              title="Delete note"
+              aria-label="Delete note"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-[var(--ink-secondary)] hover:border-[var(--vermilion)]/50 hover:text-[var(--vermilion)] transition-colors cursor-pointer"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </div>
         </div>
       </header>
 
-      {/* Detail Scrollable Reading Surface */}
-      <div className="flex-1 overflow-y-auto">
-        <article className="mx-auto max-w-[680px] px-5 sm:px-8 py-6 sm:py-9 space-y-6">
-          {/* Responsive Delete Confirmation Panel (never overflows header on mobile) */}
+      {/* Scrollable Reading Surface */}
+      <div className="flex-1 overflow-y-auto bg-[var(--surface)]">
+        <article className="mx-auto max-w-[680px] px-4 sm:px-8 py-5 sm:py-8 space-y-5">
+          {/* Responsive Delete Confirmation Panel */}
           {confirmDeleteOpen && (
             <div
               role="region"
               aria-label="Confirm deletion"
-              className="rounded-2xl border border-[var(--border-strong)] bg-[var(--canvas)] p-4 space-y-3"
+              className="rounded-lg border border-[var(--border-strong)] bg-[var(--canvas)] p-4 space-y-3"
             >
               <div className="space-y-1">
-                <p className="text-[14px] font-medium text-[var(--ink)]">
-                  Delete this voice note?
+                <p className="text-[14px] font-semibold text-[var(--ink)]">
+                  Delete {tapeCode.toLowerCase()}?
                 </p>
                 <p className="text-[13px] text-[var(--ink-muted)]">
                   Removes the recording and audio from Tapeleaf on this device.
@@ -589,7 +640,7 @@ export function DetailPane({
                       onClick={() =>
                         void executeDelete({ alsoVault: true, forceDeleteModified: true })
                       }
-                      className="inline-flex min-h-[38px] items-center rounded-xl bg-[var(--vermilion)] px-3.5 text-[13px] font-medium text-white hover:bg-[var(--vermilion-hover)] disabled:opacity-50 cursor-pointer"
+                      className="inline-flex min-h-[38px] items-center rounded-md bg-[var(--vermilion)] px-3.5 font-mono text-[11.5px] font-bold uppercase tracking-wider text-white hover:bg-[var(--vermilion-hover)] disabled:opacity-50 cursor-pointer"
                     >
                       Delete modified vault note anyway
                     </button>
@@ -597,7 +648,7 @@ export function DetailPane({
                       type="button"
                       disabled={deleteBusy}
                       onClick={() => void executeDelete({ alsoVault: false })}
-                      className="inline-flex min-h-[38px] items-center rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] disabled:opacity-50 cursor-pointer"
+                      className="inline-flex min-h-[38px] items-center rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3.5 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--ink)] hover:bg-[var(--surface-subtle)] disabled:opacity-50 cursor-pointer"
                     >
                       Delete local copy only
                     </button>
@@ -607,7 +658,7 @@ export function DetailPane({
                     type="button"
                     disabled={deleteBusy}
                     onClick={() => void executeDelete({ alsoVault: deleteAlsoFromVault })}
-                    className="inline-flex min-h-[38px] items-center rounded-xl bg-[var(--vermilion)] px-3.5 text-[13px] font-medium text-white hover:bg-[var(--vermilion-hover)] disabled:opacity-50 cursor-pointer"
+                    className="inline-flex min-h-[38px] items-center rounded-md bg-[var(--vermilion)] px-3.5 font-mono text-[11.5px] font-bold uppercase tracking-wider text-white hover:bg-[var(--vermilion-hover)] disabled:opacity-50 cursor-pointer"
                   >
                     {deleteBusy ? 'Deleting…' : 'Delete'}
                   </button>
@@ -622,7 +673,7 @@ export function DetailPane({
                     setConfirmForceModified(false);
                     setDeleteError(null);
                   }}
-                  className="inline-flex min-h-[38px] items-center rounded-xl px-3 text-[13px] font-medium text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)] cursor-pointer"
+                  className="inline-flex min-h-[38px] items-center rounded-md px-3 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)] cursor-pointer"
                 >
                   Cancel
                 </button>
@@ -633,7 +684,7 @@ export function DetailPane({
           {(copyError || shareError) && (
             <div
               role="alert"
-              className="rounded-2xl border border-[var(--border-strong)] bg-[var(--canvas)] px-4 py-3 text-[13px] text-[var(--vermilion)] flex items-center justify-between gap-2"
+              className="rounded-lg border border-[var(--border-strong)] bg-[var(--canvas)] px-4 py-3 text-[13px] text-[var(--vermilion)] flex items-center justify-between gap-2"
             >
               <span>{copyError || shareError}</span>
               <button
@@ -650,17 +701,74 @@ export function DetailPane({
             </div>
           )}
 
-          {/* Mobile Timestamp & Language Meta */}
-          <div className="flex flex-wrap items-center gap-2 sm:hidden text-[12.5px] text-[var(--ink-muted)]">
-            <span>{formatFullTimestamp(recording.created)}</span>
-            {!recording.isEnglish && recording.status === 'ready' && (
-              <span className="rounded-md bg-[var(--surface-subtle)] px-2 py-0.5 text-[11.5px] font-medium text-[var(--ink-secondary)]">
-                {recording.languageName} → English
-              </span>
-            )}
+          {/* Top Mono Telemetry Row: Timestamp + Vault Status */}
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 font-mono text-[11px] uppercase tracking-wider text-[var(--ink-muted)]">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="lg:hidden">{formatFullTimestamp(recording.created)}</span>
+              {!recording.isEnglish && recording.status === 'ready' && (
+                <span className="lg:hidden rounded border border-[var(--border-strong)] bg-[var(--panel)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--ink-secondary)]">
+                  {recording.language.toUpperCase()}→EN
+                </span>
+              )}
+              <span className="hidden lg:inline">{selectedFilename}</span>
+            </div>
+
+            <div>
+              {isSelectedWrittenToActiveVault ? (
+                <span className="inline-flex items-center gap-1 font-semibold text-[var(--led-green)]">
+                  <Check className="h-3 w-3" />
+                  Written to {vault?.folderName}
+                </span>
+              ) : isSelectedKeptObsidian ? (
+                <span className="inline-flex flex-wrap items-center gap-2 text-[var(--ink-secondary)]">
+                  <span className="inline-flex items-center gap-1">
+                    <Check className="h-3 w-3" />
+                    Obsidian copy kept
+                  </span>
+                  {vaultPermission === 'granted' && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void onSyncSingleToVault(recording.id, { forceOverwrite: true })
+                      }
+                      className="underline underline-offset-4 text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer"
+                    >
+                      Overwrite
+                    </button>
+                  )}
+                </span>
+              ) : vault && vaultPermission === 'granted' ? (
+                <button
+                  type="button"
+                  onClick={() => void onSyncSingleToVault(recording.id)}
+                  className="inline-flex items-center gap-1.5 text-[var(--ink-secondary)] hover:text-[var(--ink)] underline underline-offset-4 cursor-pointer"
+                >
+                  <FolderOpen className="h-3 w-3" />
+                  Write to {vault.folderName}
+                </button>
+              ) : vault && vaultPermission === 'prompt' ? (
+                <button
+                  type="button"
+                  onClick={onReconnectVault}
+                  className="inline-flex items-center gap-1.5 font-semibold text-[var(--led-amber)] hover:opacity-80 underline underline-offset-4 cursor-pointer"
+                >
+                  <FolderOpen className="h-3 w-3" />
+                  Reconnect {vault.folderName}
+                </button>
+              ) : vaultPermission !== 'unsupported' ? (
+                <button
+                  type="button"
+                  onClick={onOpenSettings}
+                  className="inline-flex items-center gap-1.5 hover:text-[var(--ink)] cursor-pointer"
+                >
+                  <FolderOpen className="h-3 w-3" />
+                  Connect vault
+                </button>
+              ) : null}
+            </div>
           </div>
 
-          {/* Inline Editable Title */}
+          {/* Inline Editable Title, Summary & Square Hardware Tags */}
           <div>
             {editingTitle ? (
               <input
@@ -674,49 +782,47 @@ export function DetailPane({
                   if (e.key === 'Escape') setEditingTitle(false);
                 }}
                 aria-label="Edit note title"
-                className="w-full rounded-xl border border-[var(--border-strong)] bg-[var(--canvas)] px-3 py-1.5 -mx-3 text-[26px] sm:text-[30px] font-semibold leading-[1.2] tracking-[-0.025em] text-[var(--ink)] focus:outline-none"
+                className="w-full rounded-md border border-[var(--border-strong)] bg-[var(--canvas)] px-3 py-1.5 -mx-3 text-[24px] sm:text-[28px] font-bold leading-[1.2] tracking-[-0.025em] text-[var(--ink)] focus:outline-none"
               />
             ) : (
               <button
                 type="button"
                 onClick={startEditingTitle}
                 disabled={recording.status === 'processing'}
-                className="group inline-flex items-baseline gap-2.5 text-left rounded-lg -mx-1.5 px-1.5 py-0.5 hover:bg-[var(--surface-subtle)]/70 transition-colors disabled:hover:bg-transparent cursor-pointer"
+                className="group inline-flex items-baseline gap-2.5 text-left rounded-md -mx-1.5 px-1.5 py-0.5 hover:bg-[var(--canvas)] transition-colors disabled:hover:bg-transparent cursor-pointer"
               >
-                <span className="block text-[26px] sm:text-[30px] font-semibold leading-[1.2] tracking-[-0.025em] text-[var(--ink)]">
+                <span className="block text-[24px] sm:text-[28px] font-bold leading-[1.2] tracking-[-0.025em] text-[var(--ink)]">
                   {recording.status === 'processing'
                     ? 'Listening & organizing…'
                     : recording.title}
                 </span>
                 {recording.status !== 'processing' && (
-                  <Pencil className="h-4 w-4 shrink-0 text-[var(--ink-muted)] opacity-0 group-hover:opacity-100 transition-opacity" />
+                  <Pencil className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)] opacity-0 group-hover:opacity-100 transition-opacity" />
                 )}
               </button>
             )}
 
-            {/* Editorial 1-line Summary */}
             {recording.status === 'ready' && recording.summary && (
-              <p className="mt-3.5 border-l-2 border-[var(--border-strong)] pl-4 text-[16px] leading-[1.62] text-[var(--ink-secondary)]">
+              <p className="mt-3 border-l-2 border-[var(--border-strong)] pl-3.5 text-[15px] leading-[1.58] text-[var(--ink-secondary)]">
                 {recording.summary}
               </p>
             )}
 
-            {/* Inline Editable Tags */}
             {recording.status !== 'processing' && (
-              <div className="mt-4 flex flex-wrap items-center gap-2">
+              <div className="mt-3.5 flex flex-wrap items-center gap-1.5">
                 {recording.tags.map((tag) => (
                   <span
                     key={tag}
-                    className="inline-flex items-center gap-1 rounded-full bg-[var(--surface-subtle)] pl-3 pr-1.5 py-1 text-[13px] font-medium text-[var(--ink-secondary)]"
+                    className="inline-flex items-center gap-1 rounded border border-[var(--border)] bg-[var(--canvas)] pl-2.5 pr-1 py-1 font-mono text-[11.5px] font-medium text-[var(--ink-secondary)]"
                   >
                     <span>#{tag}</span>
                     <button
                       type="button"
                       onClick={() => void onRemoveTag(recording, tag)}
                       aria-label={`Remove tag ${tag}`}
-                      className="flex h-6 w-6 items-center justify-center rounded-full text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] cursor-pointer"
+                      className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] cursor-pointer"
                     >
-                      <X className="h-3.5 w-3.5" />
+                      <X className="h-3 w-3" />
                     </button>
                   </span>
                 ))}
@@ -740,15 +846,15 @@ export function DetailPane({
                     }}
                     placeholder="new-tag"
                     aria-label="New tag name"
-                    className="h-8 w-32 rounded-full border border-[var(--border-strong)] bg-[var(--canvas)] px-3 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:outline-none"
+                    className="h-7 w-28 rounded border border-[var(--border-strong)] bg-[var(--canvas)] px-2.5 font-mono text-[11.5px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:outline-none"
                   />
                 ) : (
                   <button
                     type="button"
                     onClick={() => setAddingTag(true)}
-                    className="inline-flex h-8 items-center gap-1 rounded-full border border-dashed border-[var(--border-strong)] px-3 text-[12.5px] font-medium text-[var(--ink-muted)] hover:border-[var(--ink-muted)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+                    className="inline-flex h-7 items-center gap-1 rounded border border-dashed border-[var(--border-strong)] px-2.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-muted)] hover:border-[var(--ink-muted)] hover:text-[var(--ink)] transition-colors cursor-pointer"
                   >
-                    <Plus className="h-3.5 w-3.5" />
+                    <Plus className="h-3 w-3" />
                     tag
                   </button>
                 )}
@@ -756,14 +862,14 @@ export function DetailPane({
             )}
           </div>
 
-          {/* Clean Native Audio Playback Deck */}
+          {/* Dark Hardware Waveform Playback Deck */}
           <AudioPlayer recording={recording} onAudioLoaded={handleAudioLoaded} />
 
-          {/* Vault Write Status & Conflict Handling */}
-          {vault && selectedVaultExport?.state === 'conflict' ? (
-            <div className="rounded-2xl border border-[var(--border-strong)] bg-[var(--canvas)] p-4 space-y-3">
+          {/* Vault Conflict / Size / Error Notices */}
+          {vault && selectedVaultExport?.state === 'conflict' && (
+            <div className="rounded-lg border border-[var(--border-strong)] bg-[var(--canvas)] p-4 space-y-3">
               <div className="space-y-1">
-                <p className="inline-flex items-center gap-2 text-[14px] font-medium text-[var(--ink)]">
+                <p className="inline-flex items-center gap-2 text-[14px] font-semibold text-[var(--ink)]">
                   <AlertCircle className="h-4 w-4 text-[var(--vermilion)]" />
                   Modified in Obsidian
                 </p>
@@ -773,92 +879,43 @@ export function DetailPane({
                 <button
                   type="button"
                   onClick={() => void onSyncSingleToVault(recording.id, { forceOverwrite: true })}
-                  className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-3.5 text-[13px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
+                  className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md bg-[var(--ink)] px-3.5 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--surface)] hover:opacity-90 cursor-pointer"
                 >
                   Overwrite vault note
                 </button>
                 <button
                   type="button"
                   onClick={() => void onKeepObsidianVersion(recording)}
-                  className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] cursor-pointer"
+                  className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3.5 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--ink)] hover:bg-[var(--surface-subtle)] cursor-pointer"
                 >
                   Keep Obsidian version
                 </button>
               </div>
             </div>
-          ) : (
-            <div className="space-y-1.5 text-[12.5px] text-[var(--ink-muted)]">
-              <div className="flex flex-wrap items-center gap-2">
-                {isSelectedWrittenToActiveVault ? (
-                  <span className="inline-flex items-center gap-1.5 text-[var(--ink-secondary)]">
-                    <FolderCheck className="h-3.5 w-3.5" />
-                    Written to {vault?.folderName} (.md + audio)
-                  </span>
-                ) : isSelectedKeptObsidian ? (
-                  <span className="inline-flex flex-wrap items-center gap-2 text-[var(--ink-secondary)]">
-                    <span className="inline-flex items-center gap-1.5">
-                      <FolderCheck className="h-3.5 w-3.5" />
-                      Kept Obsidian version in {vault?.folderName}
-                    </span>
-                    {vaultPermission === 'granted' && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void onSyncSingleToVault(recording.id, { forceOverwrite: true })
-                        }
-                        className="underline underline-offset-4 text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer"
-                      >
-                        Overwrite with Tapeleaf copy
-                      </button>
-                    )}
-                  </span>
-                ) : vault && vaultPermission === 'granted' ? (
-                  <button
-                    type="button"
-                    onClick={() => void onSyncSingleToVault(recording.id)}
-                    className="inline-flex items-center gap-1.5 text-[var(--ink-secondary)] hover:text-[var(--ink)] underline underline-offset-4 cursor-pointer"
-                  >
-                    <FolderOpen className="h-3.5 w-3.5" />
-                    Write to {vault.folderName}
-                  </button>
-                ) : vault && vaultPermission === 'prompt' ? (
-                  <button
-                    type="button"
-                    onClick={onReconnectVault}
-                    className="inline-flex items-center gap-1.5 text-[var(--ink-secondary)] hover:text-[var(--ink)] underline underline-offset-4 cursor-pointer"
-                  >
-                    <FolderOpen className="h-3.5 w-3.5" />
-                    Reconnect {vault.folderName} to write
-                  </button>
-                ) : vaultPermission !== 'unsupported' ? (
-                  <button
-                    type="button"
-                    onClick={onOpenSettings}
-                    className="inline-flex items-center gap-1.5 hover:text-[var(--ink)] cursor-pointer"
-                  >
-                    <FolderOpen className="h-3.5 w-3.5" />
-                    Connect Obsidian vault folder
-                  </button>
-                ) : null}
+          )}
 
-                {recording.audioSizeBytes > OBSIDIAN_STANDARD_LIMIT_BYTES && (
-                  <span className="rounded-md bg-[var(--surface-subtle)] px-2 py-0.5 text-[11.5px] text-[var(--ink-secondary)]">
-                    {formatBytes(recording.audioSizeBytes)} · exceeds Obsidian Sync Standard 5 MB
-                    file limit (Plus: 200 MB)
-                  </span>
-                )}
-              </div>
-              {selectedVaultExport?.error && (
-                <p className="text-[12.5px] text-[var(--vermilion)]">{selectedVaultExport.error}</p>
+          {(recording.audioSizeBytes > OBSIDIAN_STANDARD_LIMIT_BYTES ||
+            (selectedVaultExport?.error && selectedVaultExport.state !== 'conflict')) && (
+            <div className="space-y-1.5 text-[12px]">
+              {recording.audioSizeBytes > OBSIDIAN_STANDARD_LIMIT_BYTES && (
+                <p className="inline-block rounded border border-[var(--border)] bg-[var(--canvas)] px-2.5 py-1 font-mono text-[11px] text-[var(--ink-secondary)]">
+                  {formatBytes(recording.audioSizeBytes)} · exceeds Obsidian Sync Standard 5 MB cap
+                  (Plus: 200 MB)
+                </p>
+              )}
+              {selectedVaultExport?.error && selectedVaultExport.state !== 'conflict' && (
+                <p className="text-[12.5px] text-[var(--vermilion)]">
+                  {selectedVaultExport.error}
+                </p>
               )}
             </div>
           )}
 
-          {/* Queued / Failed Transcription Banner */}
+          {/* Queued / Failed Transcription Banners */}
           {recording.status === 'queued' && (
-            <div className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="rounded-lg border border-[var(--border-strong)] bg-[var(--canvas)] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="space-y-1">
-                <p className="text-[14px] font-medium text-[var(--ink)]">
+                <p className="text-[14px] font-semibold text-[var(--ink)]">
                   {!hasApiKey
                     ? 'Audio saved — Gemini API key needed'
                     : !isOnline
@@ -881,7 +938,7 @@ export function DetailPane({
                 <button
                   type="button"
                   onClick={onOpenSettings}
-                  className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[var(--ink)] px-3.5 text-[13px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
+                  className="inline-flex min-h-[38px] shrink-0 items-center justify-center gap-1.5 rounded-md bg-[var(--ink)] px-3.5 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--surface)] hover:opacity-90 cursor-pointer"
                 >
                   <Settings className="h-3.5 w-3.5" />
                   Open Settings
@@ -890,7 +947,7 @@ export function DetailPane({
                 <button
                   type="button"
                   onClick={onDrainQueueNow}
-                  className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[var(--ink)] px-3.5 text-[13px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
+                  className="inline-flex min-h-[38px] shrink-0 items-center justify-center gap-1.5 rounded-md bg-[var(--ink)] px-3.5 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--surface)] hover:opacity-90 cursor-pointer"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
                   {geminiUnreachable ? 'Retry now' : 'Transcribe now'}
@@ -900,9 +957,9 @@ export function DetailPane({
           )}
 
           {recording.status === 'failed' && (
-            <div className="rounded-2xl border border-[var(--border-strong)] bg-[var(--canvas)] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="rounded-lg border border-[var(--border-strong)] bg-[var(--canvas)] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="space-y-1">
-                <p className="inline-flex items-center gap-2 text-[14px] font-medium text-[var(--ink)]">
+                <p className="inline-flex items-center gap-2 text-[14px] font-semibold text-[var(--ink)]">
                   <AlertCircle className="h-4 w-4 text-[var(--vermilion)]" />
                   Audio is saved, but transcription didn’t finish
                 </p>
@@ -914,7 +971,7 @@ export function DetailPane({
               <button
                 type="button"
                 onClick={() => void onReprocess(recording)}
-                className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[var(--ink)] px-3.5 text-[13px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
+                className="inline-flex min-h-[38px] shrink-0 items-center justify-center gap-1.5 rounded-md bg-[var(--ink)] px-3.5 font-mono text-[11.5px] font-semibold uppercase tracking-wider text-[var(--surface)] hover:opacity-90 cursor-pointer"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
                 Retry processing
@@ -922,17 +979,17 @@ export function DetailPane({
             </div>
           )}
 
-          {/* Segmented Toggle: English / Original / Markdown */}
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-            <div
-              role="tablist"
-              aria-label="Note view"
-              className="inline-flex rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] p-1"
-            >
+          {/* Hairline Hardware Tabs: TRANSCRIPT / ORIGINAL / MARKDOWN */}
+          <div className="flex items-center justify-between gap-3 border-b border-[var(--border)]">
+            <div role="tablist" aria-label="Note view" className="flex items-center gap-5">
               {availableTabs.map((tab) => {
                 const selected = detailTab === tab;
                 const label =
-                  tab === 'english' ? 'English' : tab === 'original' ? 'Original' : 'Markdown';
+                  tab === 'english'
+                    ? 'Transcript'
+                    : tab === 'original'
+                      ? 'Original'
+                      : 'Markdown';
                 return (
                   <button
                     key={tab}
@@ -948,21 +1005,23 @@ export function DetailPane({
                     onClick={() => setDetailTab(tab)}
                     onKeyDown={(e) => handleTabKeyDown(e, tab)}
                     className={[
-                      'rounded-lg px-3.5 py-1.5 text-[13.5px] font-medium transition-all cursor-pointer',
+                      'relative pb-2.5 pt-1 font-mono text-[11.5px] font-bold uppercase tracking-[0.08em] transition-colors cursor-pointer',
                       selected
-                        ? 'bg-[var(--surface)] text-[var(--ink)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]'
+                        ? 'text-[var(--ink)]'
                         : 'text-[var(--ink-muted)] hover:text-[var(--ink)]',
                     ].join(' ')}
                   >
                     {label}
+                    {selected && (
+                      <span
+                        aria-hidden="true"
+                        className="absolute left-0 right-0 -bottom-[1px] h-[2px] bg-[var(--vermilion)]"
+                      />
+                    )}
                   </button>
                 );
               })}
             </div>
-
-            <span className="font-mono text-[12px] text-[var(--ink-muted)] truncate">
-              {selectedFilename}
-            </span>
           </div>
 
           {/* Body Content */}
@@ -972,19 +1031,19 @@ export function DetailPane({
             aria-labelledby={`tapeleaf-tab-${detailTab}`}
           >
             {recording.status === 'processing' ? (
-              <div className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] p-5 space-y-3.5">
-                <div className="flex items-center gap-2.5 text-[14.5px] font-medium text-[var(--ink)]">
-                  <span className="h-2 w-2 rounded-full bg-[var(--vermilion)] animate-pulse" />
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--canvas)] p-5 space-y-3.5">
+                <div className="flex items-center gap-2.5 text-[14px] font-semibold text-[var(--ink)]">
+                  <span className="h-2 w-2 rounded-full bg-[var(--vermilion)] record-pulse" />
                   Listening &amp; organizing…
                 </div>
-                <p className="text-[14px] leading-relaxed text-[var(--ink-muted)]">
+                <p className="text-[13.5px] leading-relaxed text-[var(--ink-muted)]">
                   Your audio is safely saved on this device. Detecting language, transcribing,
                   summarizing, and formatting your Obsidian note.
                 </p>
                 <div className="space-y-2 pt-1">
-                  <div className="shimmer-bar h-3.5 w-full rounded-full" />
-                  <div className="shimmer-bar h-3.5 w-11/12 rounded-full" />
-                  <div className="shimmer-bar h-3.5 w-4/5 rounded-full" />
+                  <div className="shimmer-bar h-3 w-full rounded-[2px]" />
+                  <div className="shimmer-bar h-3 w-11/12 rounded-[2px]" />
+                  <div className="shimmer-bar h-3 w-4/5 rounded-[2px]" />
                 </div>
               </div>
             ) : detailTab === 'markdown' ? (
@@ -995,30 +1054,141 @@ export function DetailPane({
                 onCopy={() => void handleCopyMarkdown()}
               />
             ) : detailTab === 'original' && !recording.isEnglish ? (
-              <section lang={recording.language} className="space-y-4 pt-1">
-                <p className="font-mono text-[12px] uppercase tracking-wider text-[var(--ink-muted)]">
+              <section lang={recording.language} className="space-y-3.5 pt-1">
+                <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]">
                   Original · {recording.languageName}
                 </p>
                 <TranscriptContent
                   text={recording.originalTranscript ?? ''}
-                  leadingClass="leading-[1.82]"
+                  leadingClass="leading-[1.8]"
                 />
               </section>
             ) : (
-              <section className="space-y-4 pt-1">
+              <section className="space-y-3.5 pt-1">
                 {recording.englishTranscript ? (
                   <TranscriptContent
                     text={recording.englishTranscript}
-                    leadingClass="leading-[1.78]"
+                    leadingClass="leading-[1.76]"
                   />
                 ) : (
-                  <p className="text-[15px] text-[var(--ink-muted)]">No transcript yet.</p>
+                  <p className="text-[14.5px] text-[var(--ink-muted)]">No transcript yet.</p>
                 )}
               </section>
             )}
           </div>
         </article>
       </div>
+
+      {/* Mobile Bottom Action Sheet (triggered by ⋯ on small screens) */}
+      {actionSheetOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${tapeCode} actions`}
+          className="sm:hidden fixed inset-0 z-50 flex flex-col justify-end bg-black/55 backdrop-blur-[1px]"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setActionSheetOpen(false);
+          }}
+        >
+          <div className="rounded-t-2xl border-t border-[var(--border-strong)] bg-[var(--panel)] px-4 pt-2.5 safe-bottom shadow-2xl">
+            <div className="mx-auto mb-3 h-1 w-9 rounded-full bg-[var(--border-strong)]" />
+
+            <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] pb-2.5 font-mono text-[11px] uppercase tracking-wider text-[var(--ink-muted)]">
+              <span>{tapeCode} Actions</span>
+              <span className="truncate">
+                {recording.audioFilename} · {formatBytes(recording.audioSizeBytes)}
+              </span>
+            </div>
+
+            <div className="divide-y divide-[var(--border)]">
+              <button
+                type="button"
+                onClick={() => {
+                  setActionSheetOpen(false);
+                  handleDownloadMarkdown();
+                }}
+                className="flex w-full items-center justify-between gap-3 py-3.5 text-left text-[14.5px] font-medium text-[var(--ink)] active:bg-[var(--surface-hover)] cursor-pointer"
+              >
+                <span className="inline-flex items-center gap-2.5">
+                  <Download className="h-4 w-4 text-[var(--ink-muted)]" />
+                  Download Markdown (.md)
+                </span>
+                <span className="font-mono text-[11px] text-[var(--ink-muted)] truncate max-w-[110px]">
+                  {selectedFilename}
+                </span>
+              </button>
+
+              {canShareFiles && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActionSheetOpen(false);
+                    void handleShareAudio();
+                  }}
+                  className="flex w-full items-center justify-between gap-3 py-3.5 text-left text-[14.5px] font-medium text-[var(--ink)] active:bg-[var(--surface-hover)] cursor-pointer"
+                >
+                  <span className="inline-flex items-center gap-2.5">
+                    <Share2 className="h-4 w-4 text-[var(--ink-muted)]" />
+                    Share Audio File
+                  </span>
+                  <span className="font-mono text-[11px] uppercase text-[var(--ink-muted)]">
+                    Share
+                  </span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActionSheetOpen(false);
+                  void handleDownloadAudio();
+                }}
+                className="flex w-full items-center justify-between gap-3 py-3.5 text-left text-[14.5px] font-medium text-[var(--ink)] active:bg-[var(--surface-hover)] cursor-pointer"
+              >
+                <span className="inline-flex items-center gap-2.5">
+                  <FileAudio className="h-4 w-4 text-[var(--ink-muted)]" />
+                  Download Audio
+                </span>
+                <span className="font-mono text-[11px] text-[var(--ink-muted)]">
+                  .{audioExtLabel}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                disabled={recording.status === 'processing'}
+                onClick={() => {
+                  setActionSheetOpen(false);
+                  void onReprocess(recording);
+                }}
+                className="flex w-full items-center justify-between gap-3 py-3.5 text-left text-[14.5px] font-medium text-[var(--ink)] active:bg-[var(--surface-hover)] disabled:opacity-40 cursor-pointer"
+              >
+                <span className="inline-flex items-center gap-2.5">
+                  <RefreshCw className="h-4 w-4 text-[var(--ink-muted)]" />
+                  Reprocess with Gemini
+                </span>
+                <span className="font-mono text-[11px] uppercase text-[var(--ink-muted)]">
+                  Retry
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={openDeleteConfirmation}
+                className="flex w-full items-center justify-between gap-3 py-3.5 text-left text-[14.5px] font-semibold text-[var(--vermilion)] active:bg-[var(--surface-hover)] cursor-pointer"
+              >
+                <span className="inline-flex items-center gap-2.5">
+                  <Trash2 className="h-4 w-4" />
+                  Delete Tape…
+                </span>
+                <span className="font-mono text-[11px] uppercase text-[var(--vermilion)]/80">
+                  {canDeleteFromVault ? 'Local / Vault' : 'Local'}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
