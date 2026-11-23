@@ -3,6 +3,8 @@ import { describe, it } from 'node:test';
 import {
   buildDesiredNoteFilename,
   buildObsidianMarkdown,
+  formatTranscriptForMarkdown,
+  parseTranscriptBlocks,
   sanitizeMarkdownBody,
   sanitizeMarkdownInline,
 } from '../src/markdown';
@@ -14,6 +16,7 @@ import {
   writeRecordingToVault,
 } from '../src/lib/vaultSync';
 import {
+  buildPrompt,
   classifyGeminiError,
   GeminiClientError,
   parseAndValidateAnalysis,
@@ -427,6 +430,100 @@ describe('Markdown neutralization and Obsidian safety', () => {
   it('sanitizes inline and body helpers cleanly', () => {
     assert.equal(sanitizeMarkdownInline('Line1\nLine2 [[x]]'), 'Line1 Line2 \\[\\[x\\]\\]');
     assert.equal(sanitizeMarkdownBody('intro\n  ~~~js\ncode\n~~~'), 'intro\n  \\~\\~\\~js\ncode\n\\~\\~\\~');
+  });
+
+  it('parses and formats multi-speaker transcripts across plain, single-newline, named, and bolded formats', () => {
+    const standard = [
+      'Speaker 1: Should we grab chorizo before heading up?',
+      '',
+      'Speaker 2: Yeah, let us stop at the little market on the way.',
+      '',
+      'Speaker 1: Great, I will bring cash.',
+    ].join('\n');
+
+    assert.deepEqual(parseTranscriptBlocks(standard), [
+      { speaker: 'Speaker 1', text: 'Should we grab chorizo before heading up?' },
+      { speaker: 'Speaker 2', text: 'Yeah, let us stop at the little market on the way.' },
+      { speaker: 'Speaker 1', text: 'Great, I will bring cash.' },
+    ]);
+
+    assert.equal(
+      formatTranscriptForMarkdown(standard),
+      [
+        '**Speaker 1:** Should we grab chorizo before heading up?',
+        '',
+        '**Speaker 2:** Yeah, let us stop at the little market on the way.',
+        '',
+        '**Speaker 1:** Great, I will bring cash.',
+      ].join('\n'),
+    );
+
+    // Single-newline turns with named speakers & continuation line
+    const singleNewline = [
+      'Dr. Chen: Take this twice a day.',
+      'And drink plenty of water.',
+      'María: Got it, meeting at 9:30 tomorrow.',
+    ].join('\n');
+
+    assert.deepEqual(parseTranscriptBlocks(singleNewline), [
+      { speaker: 'Dr. Chen', text: 'Take this twice a day.\nAnd drink plenty of water.' },
+      { speaker: 'María', text: 'Got it, meeting at 9:30 tomorrow.' },
+    ]);
+
+    // Normalizes already-bolded speaker labels without double-bolding
+    const preBolded = '**Alex:** Hello there.\n\n**Sam**: Hey, how are you?';
+    assert.deepEqual(parseTranscriptBlocks(preBolded), [
+      { speaker: 'Alex', text: 'Hello there.' },
+      { speaker: 'Sam', text: 'Hey, how are you?' },
+    ]);
+    assert.equal(
+      formatTranscriptForMarkdown(preBolded),
+      '**Alex:** Hello there.\n\n**Sam:** Hey, how are you?',
+    );
+  });
+
+  it('does not misclassify single-speaker prose with colons, notes, or timestamps as speakers', () => {
+    const prose = [
+      'Note: pick up groceries before 5:30.',
+      '',
+      'Reminder: call the dentist on Thursday.',
+      '',
+      'Action Item: check https://example.com for hours.',
+    ].join('\n');
+
+    const blocks = parseTranscriptBlocks(prose);
+    assert.equal(blocks.every((b) => b.speaker === undefined), true);
+    assert.equal(blocks.length, 3);
+    assert.equal(formatTranscriptForMarkdown(prose), prose);
+  });
+
+  it('formats multi-speaker English and Original transcripts in Obsidian Markdown while preserving sanitization', () => {
+    const rec = makeRecording({
+      isEnglish: false,
+      language: 'es',
+      languageName: 'Spanish',
+      englishTranscript:
+        'Speaker 1: Check <script>alert(1)</script> and [[Secret]]\n\nSpeaker 2: Visit [site](obsidian://open?vault=x)',
+      originalTranscript:
+        'Speaker 1: Mira esto.\n\nSpeaker 2: Vale, gracias.',
+    });
+
+    const md = buildObsidianMarkdown(rec);
+    assert.ok(md.includes('**Speaker 1:** Check &lt;script>alert(1)&lt;/script> and \\[\\[Secret\\]\\]'));
+    assert.ok(md.includes('**Speaker 2:** Visit [site](blocked://open?vault=x)'));
+    assert.ok(md.includes('**Speaker 1:** Mira esto.\n\n**Speaker 2:** Vale, gracias.'));
+    assert.equal(md.includes('<script>'), false);
+    assert.equal(md.includes('[[Secret]]'), false);
+  });
+});
+
+describe('Gemini prompt speaker diarization guidance', () => {
+  it('instructs Gemini to omit labels for one speaker and label turns for multiple speakers', () => {
+    const prompt = buildPrompt(['work', 'meetings']);
+    assert.match(prompt, /one speaker/i);
+    assert.match(prompt, /NO speaker labels/i);
+    assert.match(prompt, /Speaker 1:/);
+    assert.match(prompt, /originalTranscript and englishTranslation/);
   });
 });
 

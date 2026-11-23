@@ -32,12 +32,86 @@ import {
   formatBytes,
   formatFullTimestamp,
   normalizeTag,
+  parseTranscriptBlocks,
 } from '../markdown';
 import type { Recording, StoredVaultHandle } from '../types';
 
 type DetailTab = 'english' | 'original' | 'markdown';
 
 const OBSIDIAN_STANDARD_LIMIT_BYTES = 5 * 1024 * 1024; // 5 MB
+
+const SPEAKER_DOT_STYLES = [
+  'bg-[var(--ink)]',
+  'bg-[var(--vermilion)]',
+  'bg-[var(--ink-muted)]',
+  'border-[1.5px] border-[var(--ink)] bg-transparent',
+] as const;
+
+function TranscriptContent({
+  text,
+  leadingClass,
+}: {
+  text: string;
+  leadingClass: string;
+}) {
+  const { blocks, speakerIndices, hasSpeakers } = useMemo(() => {
+    const parsed = parseTranscriptBlocks(text);
+    const indices = new Map<string, number>();
+    let anySpeaker = false;
+    for (const block of parsed) {
+      if (block.speaker) {
+        anySpeaker = true;
+        const key = block.speaker.toLowerCase();
+        if (!indices.has(key)) {
+          indices.set(key, indices.size);
+        }
+      }
+    }
+    return { blocks: parsed, speakerIndices: indices, hasSpeakers: anySpeaker };
+  }, [text]);
+
+  if (!hasSpeakers) {
+    return (
+      <div className={`space-y-4 text-[17px] ${leadingClass} text-[var(--ink)]`}>
+        {blocks.map((block, idx) => (
+          <p key={idx} className="whitespace-pre-line">
+            {block.text}
+          </p>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className={`space-y-5 text-[17px] ${leadingClass} text-[var(--ink)]`}>
+      {blocks.map((block, idx) => {
+        if (!block.speaker) {
+          return (
+            <p key={idx} className="whitespace-pre-line">
+              {block.text}
+            </p>
+          );
+        }
+        const speakerIdx = speakerIndices.get(block.speaker.toLowerCase()) ?? 0;
+        const dotClass = SPEAKER_DOT_STYLES[speakerIdx % SPEAKER_DOT_STYLES.length];
+        return (
+          <div key={idx} className="space-y-1">
+            <div className="inline-flex items-center gap-2">
+              <span
+                aria-hidden="true"
+                className={`h-2 w-2 shrink-0 rounded-full ${dotClass}`}
+              />
+              <span className="text-[12.5px] font-semibold tracking-tight text-[var(--ink-secondary)]">
+                {block.speaker}
+              </span>
+            </div>
+            <p className="whitespace-pre-line">{block.text}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export interface DeleteRequestOutcome {
   ok: boolean;
@@ -925,26 +999,18 @@ export function DetailPane({
                 <p className="font-mono text-[12px] uppercase tracking-wider text-[var(--ink-muted)]">
                   Original · {recording.languageName}
                 </p>
-                <div className="space-y-4 text-[17px] leading-[1.82] text-[var(--ink)]">
-                  {(recording.originalTranscript ?? '')
-                    .split(/\n{2,}/)
-                    .filter(Boolean)
-                    .map((para, idx) => (
-                      <p key={idx}>{para}</p>
-                    ))}
-                </div>
+                <TranscriptContent
+                  text={recording.originalTranscript ?? ''}
+                  leadingClass="leading-[1.82]"
+                />
               </section>
             ) : (
               <section className="space-y-4 pt-1">
                 {recording.englishTranscript ? (
-                  <div className="space-y-4 text-[17px] leading-[1.78] text-[var(--ink)]">
-                    {recording.englishTranscript
-                      .split(/\n{2,}/)
-                      .filter(Boolean)
-                      .map((para, idx) => (
-                        <p key={idx}>{para}</p>
-                      ))}
-                  </div>
+                  <TranscriptContent
+                    text={recording.englishTranscript}
+                    leadingClass="leading-[1.78]"
+                  />
                 ) : (
                   <p className="text-[15px] text-[var(--ink-muted)]">No transcript yet.</p>
                 )}

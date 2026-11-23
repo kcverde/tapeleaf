@@ -115,6 +115,254 @@ export function sanitizeMarkdownBody(raw: string): string {
     );
 }
 
+export interface TranscriptBlock {
+  speaker?: string;
+  text: string;
+}
+
+const SPEAKER_NAME_PARTICLES = new Set([
+  'de',
+  'del',
+  'la',
+  'las',
+  'los',
+  'van',
+  'von',
+  'da',
+  'di',
+  'du',
+  'al',
+  'bin',
+  'ibn',
+  'of',
+]);
+
+const NON_SPEAKER_LABELS = new Set([
+  'note',
+  'notes',
+  'quick note',
+  'side note',
+  'final note',
+  'voice note',
+  'reminder',
+  'reminders',
+  'todo',
+  'to-do',
+  'to do',
+  'summary',
+  'update',
+  'warning',
+  'caution',
+  'tip',
+  'tips',
+  'pro tip',
+  'example',
+  'examples',
+  'action',
+  'actions',
+  'action item',
+  'next step',
+  'key point',
+  'key takeaway',
+  'follow up',
+  'follow-up',
+  'open question',
+  'step',
+  'item',
+  'link',
+  'url',
+  'context',
+  'background',
+  'topic',
+  'subject',
+  'date',
+  'time',
+  'location',
+  'address',
+  'phone',
+  'email',
+  'agenda',
+  'goal',
+  'goals',
+  'idea',
+  'ideas',
+  'plan',
+  'result',
+  'results',
+  'conclusion',
+  'important',
+  'first',
+  'second',
+  'third',
+  'option',
+  'part',
+  'section',
+  'chapter',
+  'pros',
+  'cons',
+  'ps',
+  'p.s.',
+  'nb',
+  'n.b.',
+  'tldr',
+  'tl;dr',
+  'http',
+  'https',
+  'mailto',
+  'file',
+  'obsidian',
+]);
+
+const EXPLICIT_SPEAKER_RE = /^speaker\s+(?:\d{1,2}|[a-z])$/i;
+const CAPITALIZED_WORD_RE = /^[\p{Lu}\p{Lt}][\p{L}\p{M}'’-]*\.?$/u;
+const CASELESS_WORD_RE = /^[\p{Lo}][\p{Lo}\p{M}\p{Nd}'’-]*$/u;
+const SPEAKER_NUMBER_RE = /^\d{1,2}$/;
+
+function isValidSpeakerLabel(rawLabel: string): boolean {
+  const label = rawLabel.replace(/\s+/g, ' ').trim();
+  if (!label || label.length > 32) return false;
+
+  const lower = label.toLowerCase();
+  if (NON_SPEAKER_LABELS.has(lower)) return false;
+  if (EXPLICIT_SPEAKER_RE.test(label)) return true;
+
+  const words = label.split(' ');
+  if (words.length > 3) return false;
+
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i];
+    if (CAPITALIZED_WORD_RE.test(word) || CASELESS_WORD_RE.test(word)) {
+      continue;
+    }
+    if (i > 0 && SPEAKER_NUMBER_RE.test(word)) {
+      continue;
+    }
+    if (i > 0 && i < words.length - 1 && SPEAKER_NAME_PARTICLES.has(word.toLowerCase())) {
+      continue;
+    }
+    return false;
+  }
+
+  return true;
+}
+
+function matchSpeakerPrefix(line: string): { speaker: string; text: string } | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+
+  // Accept plain ("Speaker 1: ...") or model-bolded ("**Speaker 1:** ...", "**Speaker 1**: ...")
+  let rawLabel = '';
+  let text = '';
+
+  const boldColonInside = trimmed.match(/^\*\*([^*\n]{1,36}?)(?::|：)\*\*(?:\s+(.+)|(.+))$/);
+  const boldColonOutside = !boldColonInside
+    ? trimmed.match(/^\*\*([^*\n]{1,36}?)\*\*(?::\s+|：\s*)(.+)$/)
+    : null;
+  const plainPrefix =
+    !boldColonInside && !boldColonOutside
+      ? trimmed.match(/^([^:\n：*]{1,36}?)(?::\s+|：\s*)(.+)$/)
+      : null;
+
+  if (boldColonInside) {
+    rawLabel = boldColonInside[1];
+    text = (boldColonInside[2] ?? boldColonInside[3] ?? '').trim();
+  } else if (boldColonOutside) {
+    rawLabel = boldColonOutside[1];
+    text = boldColonOutside[2].trim();
+  } else if (plainPrefix) {
+    rawLabel = plainPrefix[1];
+    text = plainPrefix[2].trim();
+  } else {
+    return null;
+  }
+
+  const label = rawLabel.replace(/\s+/g, ' ').trim();
+  if (!text || !isValidSpeakerLabel(label)) return null;
+  return { speaker: label, text };
+}
+
+/**
+ * Splits a transcript into paragraphs, promoting speaker-prefixed turns only when
+ * the transcript shows coherent multi-speaker structure (preventing false positives
+ * on single-speaker prose that happens to contain colons).
+ */
+export function parseTranscriptBlocks(raw: string): TranscriptBlock[] {
+  const normalized = raw.replace(/\r\n?/g, '\n').trim();
+  if (!normalized) return [];
+
+  const rawParagraphs = normalized
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const candidates: Array<{ speaker?: string; lines: string[] }> = [];
+
+  for (const para of rawParagraphs) {
+    const lines = para.split('\n');
+    let current: { speaker?: string; lines: string[] } | null = null;
+
+    for (const line of lines) {
+      const match = matchSpeakerPrefix(line);
+      if (match) {
+        if (current) candidates.push(current);
+        current = { speaker: match.speaker, lines: [match.text] };
+      } else if (current) {
+        current.lines.push(line);
+      } else {
+        current = { lines: [line] };
+      }
+    }
+
+    if (current) candidates.push(current);
+  }
+
+  const uniqueSpeakers = new Set<string>();
+  let labeledCount = 0;
+  let explicitSpeakerCount = 0;
+
+  for (const c of candidates) {
+    if (c.speaker) {
+      labeledCount += 1;
+      uniqueSpeakers.add(c.speaker.toLowerCase());
+      if (EXPLICIT_SPEAKER_RE.test(c.speaker)) {
+        explicitSpeakerCount += 1;
+      }
+    }
+  }
+
+  const isMultiSpeaker =
+    labeledCount >= 2 &&
+    (uniqueSpeakers.size >= 2 || explicitSpeakerCount >= 2) &&
+    labeledCount / candidates.length >= 0.5;
+
+  if (!isMultiSpeaker) {
+    return rawParagraphs.map((text) => ({ text }));
+  }
+
+  return candidates.map((c) => ({
+    ...(c.speaker ? { speaker: c.speaker } : {}),
+    text: c.lines.join('\n').trim(),
+  }));
+}
+
+/**
+ * Sanitizes a transcript body for Obsidian Markdown and formats detected
+ * multi-speaker turns cleanly as `**Speaker:** ...` separated by blank lines.
+ */
+export function formatTranscriptForMarkdown(raw: string): string {
+  const sanitized = sanitizeMarkdownBody(raw);
+  if (!sanitized) return '';
+
+  const blocks = parseTranscriptBlocks(sanitized);
+  if (!blocks.some((b) => b.speaker)) {
+    return sanitized;
+  }
+
+  return blocks
+    .map((b) => (b.speaker ? `**${b.speaker}:** ${b.text}` : b.text))
+    .join('\n\n');
+}
+
 /**
  * Human-readable note title matching "YYYY-MM-DD HH:MM - Concise Subject".
  */
@@ -198,11 +446,11 @@ export function buildObsidianMarkdown(recording: Recording): string {
 
   lines.push(`![[${embedTarget}]]`, '');
   lines.push('## Transcript', '');
-  const safeTranscript = sanitizeMarkdownBody(recording.englishTranscript);
+  const safeTranscript = formatTranscriptForMarkdown(recording.englishTranscript);
   lines.push(safeTranscript || '_Transcript pending…_');
 
   if (!recording.isEnglish && recording.originalTranscript?.trim()) {
-    const safeOriginal = sanitizeMarkdownBody(recording.originalTranscript);
+    const safeOriginal = formatTranscriptForMarkdown(recording.originalTranscript);
     if (safeOriginal) {
       lines.push(
         '',

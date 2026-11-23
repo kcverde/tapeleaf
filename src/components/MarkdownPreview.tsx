@@ -106,6 +106,15 @@ export function MarkdownPreview({
               </div>
             );
           }
+          const speakerMatch = line.match(/^(\*\*[^*\n]+:\*\*)(.*)$/);
+          if (speakerMatch) {
+            return (
+              <div key={index} className="text-[var(--ink)]">
+                <span className="font-semibold text-[var(--ink)]">{speakerMatch[1]}</span>
+                <span>{speakerMatch[2]}</span>
+              </div>
+            );
+          }
           return (
             <div key={index} className="text-[var(--ink)]">
               {line || '\u00A0'}

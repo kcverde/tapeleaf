@@ -196,12 +196,12 @@ function buildResponseSchema(TypeEnum: typeof import('@google/genai').Type) {
       originalTranscript: {
         type: TypeEnum.STRING,
         description:
-          'Clean, punctuated verbatim transcript in the original spoken language, split into natural paragraphs.',
+          'Clean, punctuated verbatim transcript in the original spoken language, split into natural paragraphs. If multiple distinct speakers are heard, prefix each speaker turn on its own paragraph with a plain-text label (e.g. "Speaker 1: ..." or spoken name); if only one speaker is heard, omit speaker labels.',
       },
       englishTranslation: {
         type: TypeEnum.STRING,
         description:
-          'Clean, natural English translation of the full transcript (if spoken in English, match originalTranscript cleanly).',
+          'Clean, natural English translation of the full transcript (if spoken in English, match originalTranscript cleanly), preserving the exact same speaker labels and turn breaks when multiple speakers are present.',
       },
     },
     required: [
@@ -233,6 +233,7 @@ export function buildPrompt(existingTags: string[]): string {
     '- Write a crisp 1-sentence English summary capturing the core point or next step.',
     `- Assign 2 to 4 lowercase kebab-case tags. ${tagGuidance}`,
     '- Write a clean, well-punctuated transcript in originalTranscript (in the spoken language, using natural paragraph breaks and removing only meaningless stutter noise while staying faithful to what was said).',
+    '- Speaker identification: if only one speaker is heard, write normal paragraphs with NO speaker labels. If multiple distinct speakers are heard, start each speaker turn on a new paragraph separated by a blank line and prefix it with a plain-text label followed by a colon and space (e.g. "Speaker 1: ...", "Speaker 2: ..."). If a speaker\'s name is clearly spoken or introduced in the audio, use that name consistently instead of "Speaker N". Do not wrap speaker labels in Markdown bold/asterisks, and keep speaker labels identical between originalTranscript and englishTranslation.',
     '- Write a clean, natural English transcript in englishTranslation. If the clip is already in English, englishTranslation should be the clean English transcript.',
     '- If the audio is silent or unintelligible, return languageCode "en", isEnglish true, a brief honest title like "Silent or unclear audio clip", a short summary explaining that no clear speech was detected, tags ["unclear"], and a brief honest transcript note.',
   ].join('\n');
