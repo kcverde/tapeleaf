@@ -8,14 +8,13 @@ import {
   FolderOpen,
   HardDrive,
   KeyRound,
+  Pencil,
   RefreshCw,
+  Trash2,
   Unlink,
   X,
 } from 'lucide-react';
-import {
-  AVAILABLE_MODELS,
-  verifyGeminiApiKey,
-} from '../lib/geminiClient';
+import { AVAILABLE_MODELS, verifyGeminiApiKey } from '../lib/geminiClient';
 import { getStorageStats } from '../lib/db';
 import type { VaultPermissionState } from '../lib/vaultSync';
 import { formatBytes } from '../markdown';
@@ -38,6 +37,12 @@ interface SettingsModalProps {
   onSyncVaultNow: () => Promise<void>;
 }
 
+function maskApiKey(key: string): string {
+  const trimmed = key.trim();
+  if (trimmed.length <= 8) return '••••••••';
+  return `${trimmed.slice(0, 4)}••••••••••••${trimmed.slice(-4)}`;
+}
+
 export function SettingsModal({
   open,
   onClose,
@@ -54,9 +59,9 @@ export function SettingsModal({
   onDisconnectVault,
   onSyncVaultNow,
 }: SettingsModalProps) {
-  const [keyDraft, setKeyDraft] = useState(apiKey);
+  const [editingKey, setEditingKey] = useState(!apiKey.trim());
+  const [keyDraft, setKeyDraft] = useState('');
   const [rememberDraft, setRememberDraft] = useState(rememberKey);
-  const [modelDraft, setModelDraft] = useState(model);
   const [showKey, setShowKey] = useState(false);
   const [testingKey, setTestingKey] = useState(false);
   const [keyFeedback, setKeyFeedback] = useState<{ ok: boolean; text: string } | null>(null);
@@ -68,15 +73,18 @@ export function SettingsModal({
     quotaBytes: number;
   } | null>(null);
 
+  const hasSavedKey = Boolean(apiKey.trim());
+
   useEffect(() => {
     if (!open) return;
-    setKeyDraft(apiKey);
+    setEditingKey(!apiKey.trim());
+    setKeyDraft('');
     setRememberDraft(rememberKey);
-    setModelDraft(model);
+    setShowKey(false);
     setKeyFeedback(null);
     setVaultMessage(null);
     void getStorageStats().then(setStorageStats);
-  }, [open, apiKey, rememberKey, model]);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -89,34 +97,75 @@ export function SettingsModal({
 
   if (!open) return null;
 
-  const handleSave = () => {
+  const handleSaveNewKey = () => {
+    const clean = keyDraft.trim();
+    if (!clean) return;
     onSaveGemini({
-      apiKey: keyDraft.trim(),
+      apiKey: clean,
       rememberOnDevice: rememberDraft,
-      model: modelDraft,
+      model,
     });
+    setKeyDraft('');
+    setShowKey(false);
+    setEditingKey(false);
     setKeyFeedback({
       ok: true,
-      text: keyDraft.trim()
-        ? rememberDraft
-          ? 'Saved on this device.'
-          : 'Saved for this session.'
-        : 'Key cleared.',
+      text: rememberDraft ? 'Key saved on this device.' : 'Key saved for this session.',
     });
   };
 
-  const handleTestKey = async () => {
+  const handleClearKey = () => {
+    onSaveGemini({
+      apiKey: '',
+      rememberOnDevice: false,
+      model,
+    });
+    setKeyDraft('');
+    setRememberDraft(false);
+    setEditingKey(true);
+    setKeyFeedback({ ok: true, text: 'API key cleared.' });
+  };
+
+  const handleToggleRememberSaved = (nextRemember: boolean) => {
+    setRememberDraft(nextRemember);
+    if (hasSavedKey && !editingKey) {
+      onSaveGemini({
+        apiKey,
+        rememberOnDevice: nextRemember,
+        model,
+      });
+      setKeyFeedback({
+        ok: true,
+        text: nextRemember
+          ? 'Saved on this device (persists across restarts).'
+          : 'Switched to session-only (clears when closed).',
+      });
+    }
+  };
+
+  const handleModelChange = (nextModel: string) => {
+    onSaveGemini({
+      apiKey,
+      rememberOnDevice: rememberKey,
+      model: nextModel,
+    });
+  };
+
+  const handleTestKey = async (targetKey: string, saveIfValid: boolean) => {
     setTestingKey(true);
     setKeyFeedback(null);
-    const res = await verifyGeminiApiKey(keyDraft);
+    const res = await verifyGeminiApiKey(targetKey);
     setTestingKey(false);
     setKeyFeedback({ ok: res.ok, text: res.message });
-    if (res.ok) {
+    if (res.ok && saveIfValid && targetKey.trim()) {
       onSaveGemini({
-        apiKey: keyDraft.trim(),
+        apiKey: targetKey.trim(),
         rememberOnDevice: rememberDraft,
-        model: modelDraft,
+        model,
       });
+      setKeyDraft('');
+      setShowKey(false);
+      setEditingKey(false);
     }
   };
 
@@ -205,9 +254,10 @@ export function SettingsModal({
                   </div>
                 ) : (
                   <p className="text-[13.5px] leading-relaxed text-[var(--ink-secondary)]">
-                    Connect a subfolder (like <code className="font-mono text-[12.5px]">Tapeleaf</code>)
-                    inside your Obsidian vault stored in <strong>Device storage</strong>. Tapeleaf
-                    writes both the <code className="font-mono text-[12.5px]">.md</code> note and{' '}
+                    Connect a subfolder (like{' '}
+                    <code className="font-mono text-[12.5px]">Tapeleaf</code>) inside your Obsidian
+                    vault stored in <strong>Device storage</strong>. Tapeleaf writes both the{' '}
+                    <code className="font-mono text-[12.5px]">.md</code> note and{' '}
                     <code className="font-mono text-[12.5px]">audio/</code> clip directly there so{' '}
                     <strong>Obsidian Sync</strong> syncs both automatically.
                   </p>
@@ -245,7 +295,9 @@ export function SettingsModal({
                     <button
                       type="button"
                       disabled={vaultBusy}
-                      onClick={() => void runVaultAction(onSyncVaultNow, 'Vault write check complete.')}
+                      onClick={() =>
+                        void runVaultAction(onSyncVaultNow, 'Vault write check complete.')
+                      }
                       className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] disabled:opacity-50 cursor-pointer"
                     >
                       <RefreshCw className={`h-3.5 w-3.5 ${vaultBusy ? 'animate-spin' : ''}`} />
@@ -300,57 +352,189 @@ export function SettingsModal({
               </a>
             </div>
 
-            <div className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] p-4 space-y-3.5">
-              <div className="space-y-1.5">
-                <label htmlFor="tapeleaf-api-key" className="block text-[13px] font-medium text-[var(--ink-secondary)]">
-                  Gemini API Key
-                </label>
-                <div className="relative flex items-center">
-                  <input
-                    id="tapeleaf-api-key"
-                    type={showKey ? 'text' : 'password'}
-                    value={keyDraft}
-                    onChange={(e) => setKeyDraft(e.target.value)}
-                    placeholder="AIza..."
-                    autoComplete="off"
-                    spellCheck={false}
-                    className="h-11 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] pl-3.5 pr-11 font-mono text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--border-strong)] focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowKey((s) => !s)}
-                    aria-label={showKey ? 'Hide API key' : 'Show API key'}
-                    className="absolute right-2 flex h-8 w-8 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer"
-                  >
-                    {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                  </button>
+            <div className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] p-4 space-y-4">
+              {hasSavedKey && !editingKey ? (
+                /* SAVED KEY STATE: calm locked/masked summary with clear actions */
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)]/75 px-3.5 py-2.5">
+                    <div className="min-w-0">
+                      <p className="font-mono text-[13px] text-[var(--ink-secondary)] truncate">
+                        {maskApiKey(apiKey)}
+                      </p>
+                      <p className="mt-0.5 inline-flex items-center gap-1 text-[12px] text-[var(--ink-muted)]">
+                        <Check className="h-3 w-3 text-[var(--ink)]" />
+                        {rememberKey ? 'Saved on this device' : 'Saved for this session only'}
+                      </p>
+                    </div>
+                    <span className="shrink-0 rounded-full bg-[var(--surface)] border border-[var(--border)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--ink)]">
+                      Saved
+                    </span>
+                  </div>
+
+                  <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={rememberKey}
+                      onChange={(e) => handleToggleRememberSaved(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 accent-[var(--ink)] rounded cursor-pointer"
+                    />
+                    <span className="text-[13px] leading-snug text-[var(--ink-secondary)]">
+                      Remember key on this device
+                      <span className="block text-[12px] text-[var(--ink-muted)]">
+                        {rememberKey
+                          ? 'Stays saved after closing the app. Sent only to Google’s Gemini API.'
+                          : 'Session-only right now—clears when you close the app.'}
+                      </span>
+                    </span>
+                  </label>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleTestKey(apiKey, false)}
+                      disabled={testingKey}
+                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] disabled:opacity-45 cursor-pointer"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${testingKey ? 'animate-spin' : ''}`} />
+                      Test key
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setKeyDraft('');
+                        setShowKey(false);
+                        setKeyFeedback(null);
+                        setEditingKey(true);
+                      }}
+                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] cursor-pointer"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                      Change key
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleClearKey}
+                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-3 text-[13px] font-medium text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--vermilion)] cursor-pointer"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Clear
+                    </button>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                /* ADD / CHANGE KEY STATE */
+                <div className="space-y-3.5">
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor="tapeleaf-api-key"
+                      className="block text-[13px] font-medium text-[var(--ink-secondary)]"
+                    >
+                      {hasSavedKey ? 'Enter new Gemini API Key' : 'Gemini API Key'}
+                    </label>
+                    <div className="relative flex items-center">
+                      <input
+                        id="tapeleaf-api-key"
+                        type={showKey ? 'text' : 'password'}
+                        value={keyDraft}
+                        onChange={(e) => setKeyDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && keyDraft.trim()) {
+                            e.preventDefault();
+                            handleSaveNewKey();
+                          }
+                        }}
+                        placeholder="AIza..."
+                        autoComplete="off"
+                        spellCheck={false}
+                        autoFocus={editingKey}
+                        className="h-11 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] pl-3.5 pr-11 font-mono text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--border-strong)] focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowKey((s) => !s)}
+                        aria-label={showKey ? 'Hide API key' : 'Show API key'}
+                        className="absolute right-2 flex h-8 w-8 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer"
+                      >
+                        {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
 
-              <label className="flex items-start gap-2.5 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={rememberDraft}
-                  onChange={(e) => setRememberDraft(e.target.checked)}
-                  className="mt-1 h-4 w-4 accent-[var(--ink)] rounded cursor-pointer"
-                />
-                <span className="text-[13px] leading-snug text-[var(--ink-secondary)]">
-                  Remember key on this device
-                  <span className="block text-[12px] text-[var(--ink-muted)]">
-                    Off = session-only (clears when you close the app). Your key is sent only to
-                    Google’s Gemini API.
-                  </span>
-                </span>
-              </label>
+                  <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={rememberDraft}
+                      onChange={(e) => setRememberDraft(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 accent-[var(--ink)] rounded cursor-pointer"
+                    />
+                    <span className="text-[13px] leading-snug text-[var(--ink-secondary)]">
+                      Remember key on this device
+                      <span className="block text-[12px] text-[var(--ink-muted)]">
+                        Off = session-only (clears when you close the app). Your key is sent only
+                        to Google’s Gemini API.
+                      </span>
+                    </span>
+                  </label>
 
-              <div className="space-y-1.5">
-                <label htmlFor="tapeleaf-model" className="block text-[13px] font-medium text-[var(--ink-secondary)]">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleSaveNewKey}
+                      disabled={!keyDraft.trim()}
+                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-4 text-[13px] font-medium text-[var(--canvas)] hover:opacity-90 disabled:opacity-40 cursor-pointer"
+                    >
+                      <Check className="h-4 w-4" />
+                      Save key
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleTestKey(keyDraft, true)}
+                      disabled={testingKey || !keyDraft.trim()}
+                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] disabled:opacity-40 cursor-pointer"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${testingKey ? 'animate-spin' : ''}`} />
+                      Test &amp; Save
+                    </button>
+                    {hasSavedKey && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setKeyDraft('');
+                          setEditingKey(false);
+                          setKeyFeedback(null);
+                        }}
+                        className="inline-flex min-h-[40px] items-center rounded-xl px-3 text-[13px] font-medium text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {keyFeedback && (
+                <p
+                  className={[
+                    'text-[12.5px] inline-flex items-center gap-1.5',
+                    keyFeedback.ok ? 'text-[var(--ink-secondary)]' : 'text-[var(--vermilion)]',
+                  ].join(' ')}
+                >
+                  {keyFeedback.ok && <Check className="h-3.5 w-3.5 shrink-0" />}
+                  {keyFeedback.text}
+                </p>
+              )}
+
+              <div className="border-t border-[var(--border)] pt-3.5 space-y-1.5">
+                <label
+                  htmlFor="tapeleaf-model"
+                  className="block text-[13px] font-medium text-[var(--ink-secondary)]"
+                >
                   Model
                 </label>
                 <select
                   id="tapeleaf-model"
-                  value={modelDraft}
-                  onChange={(e) => setModelDraft(e.target.value)}
+                  value={model}
+                  onChange={(e) => handleModelChange(e.target.value)}
                   className="h-10 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 text-[13.5px] text-[var(--ink)] focus:border-[var(--border-strong)] focus:outline-none"
                 >
                   {AVAILABLE_MODELS.map((m) => (
@@ -360,37 +544,6 @@ export function SettingsModal({
                   ))}
                 </select>
               </div>
-
-              <div className="flex flex-wrap items-center gap-2 pt-0.5">
-                <button
-                  type="button"
-                  onClick={handleSave}
-                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--ink)] px-4 text-[13px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
-                >
-                  <Check className="h-4 w-4" />
-                  Save
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleTestKey()}
-                  disabled={testingKey || !keyDraft.trim()}
-                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-[13px] font-medium text-[var(--ink)] hover:bg-[var(--surface-subtle)] disabled:opacity-45 cursor-pointer"
-                >
-                  <RefreshCw className={`h-3.5 w-3.5 ${testingKey ? 'animate-spin' : ''}`} />
-                  Test key
-                </button>
-              </div>
-
-              {keyFeedback && (
-                <p
-                  className={[
-                    'text-[12.5px]',
-                    keyFeedback.ok ? 'text-[var(--ink-secondary)]' : 'text-[var(--vermilion)]',
-                  ].join(' ')}
-                >
-                  {keyFeedback.text}
-                </p>
-              )}
             </div>
           </section>
 
