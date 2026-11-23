@@ -570,7 +570,11 @@ export default function App() {
   const syncSingleToVault = useCallback(
     async (
       id: string,
-      options?: { forceOverwrite?: boolean; vaultOverride?: StoredVaultHandle | null },
+      options?: {
+        forceOverwrite?: boolean;
+        deferMarkdown?: boolean;
+        vaultOverride?: StoredVaultHandle | null;
+      },
     ) => {
       const activeVault = options?.vaultOverride ?? vaultRef.current;
       const perm = options?.vaultOverride ? 'granted' : vaultPermRef.current;
@@ -585,6 +589,7 @@ export default function App() {
           recording: rec,
           audioBlob: audio?.blob ?? null,
           forceOverwrite: options?.forceOverwrite,
+          deferMarkdown: options?.deferMarkdown,
           onReserveFilename: async (reserved) => {
             const saved = await updateRecordingVaultExport(id, reserved);
             if (saved) {
@@ -631,7 +636,13 @@ export default function App() {
       const current = await listRecordings();
       for (const rec of current) {
         if (!needsVaultWrite(rec, activeVault.vaultId)) continue;
-        const outcome = await syncSingleToVault(rec.id, { vaultOverride: activeVault });
+        const defer =
+          rec.status === 'processing' &&
+          !getVaultExportFor(rec, activeVault.vaultId)?.filename;
+        const outcome = await syncSingleToVault(rec.id, {
+          vaultOverride: activeVault,
+          deferMarkdown: defer,
+        });
         if (!outcome) continue;
         if (outcome.permissionLost) {
           permissionLost = true;
@@ -742,6 +753,7 @@ export default function App() {
                 const requeued = await markRecordingStatus(item.id, 'queued');
                 if (requeued) {
                   setRecordings((prev) => prev.map((r) => (r.id === item.id ? requeued : r)));
+                  void syncSingleToVault(item.id);
                 }
                 break;
               }
@@ -905,7 +917,13 @@ export default function App() {
         flashToast('Saved');
 
         if (vaultRef.current && vaultPermRef.current === 'granted') {
-          void syncSingleToVault(id);
+          // If online with a Gemini key, write audio immediately and wait ~2-3s for the
+          // concise subject before writing the .md file so it lands with the final filename.
+          const willTranscribeNow =
+            navigator.onLine &&
+            Boolean(geminiSettingsRef.current.apiKey.trim()) &&
+            !queuePausedRef.current;
+          void syncSingleToVault(id, { deferMarkdown: willTranscribeNow });
         }
 
         void drainTranscriptionQueue();

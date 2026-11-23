@@ -133,7 +133,7 @@ function buildResponseSchema(TypeEnum: typeof import('@google/genai').Type) {
       title: {
         type: TypeEnum.STRING,
         description:
-          'Concrete, scannable English title (3-8 words) capturing the actual topic, never generic like "Voice note".',
+          'Very concise Title Case English subject (2-5 words, e.g. "Dentist Visit", "Lisbon Weekend Trip", "Q4 Onboarding Notes"). No dates, times, punctuation, or generic phrases like "Voice note".',
       },
       summary: {
         type: TypeEnum.STRING,
@@ -179,7 +179,7 @@ function buildPrompt(existingTags: string[]): string {
     'You are transcribing and organizing a personal voice memo into an Obsidian Markdown note.',
     'Listen carefully to the attached audio and return a single JSON object matching the schema:',
     '- Detect the spoken language accurately (detectedLanguage + 2-letter lowercase languageCode + isEnglish).',
-    '- Write a concrete, human, scannable English title (3 to 8 words). Avoid filler like "Voice Memo" or dates.',
+    '- Write a very concise Title Case English subject (2 to 5 words, e.g. "Dentist Visit", "Lisbon Trip Ideas"). No dates, times, or filler like "Voice Memo".',
     '- Write a crisp 1-sentence English summary capturing the core point or next step.',
     `- Assign 2 to 4 lowercase kebab-case tags. ${tagGuidance}`,
     '- Write a clean, well-punctuated transcript in originalTranscript (in the spoken language, using natural paragraph breaks and removing only meaningless stutter noise while staying faithful to what was said).',

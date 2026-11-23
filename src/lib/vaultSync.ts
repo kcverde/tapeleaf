@@ -1,4 +1,8 @@
-import { buildNoteFilename, buildObsidianMarkdown } from '../markdown';
+import {
+  buildDesiredNoteFilename,
+  buildNoteFilename,
+  buildObsidianMarkdown,
+} from '../markdown';
 import type { Recording, StoredVaultHandle, VaultExportState } from '../types';
 import {
   clearStoredVaultHandle,
@@ -101,12 +105,6 @@ export async function loadVaultConnection(): Promise<{
   };
 }
 
-/**
- * Prompts the user to pick an Obsidian vault folder (ideally a dedicated
- * Tapeleaf subfolder inside Device storage). Checks all previously connected
- * handles via isSameEntry() so disconnecting and reselecting the same folder
- * preserves its vaultId and external-edit hash baselines.
- */
 export async function pickVaultFolder(
   previous: StoredVaultHandle | null,
 ): Promise<{ stored: StoredVaultHandle; isNewDestination: boolean }> {
@@ -172,7 +170,6 @@ export async function pickVaultFolder(
 }
 
 export async function disconnectVaultFolder(): Promise<void> {
-  // Keep vault history so reconnecting the same folder restores hash baselines
   await clearStoredVaultHandle();
 }
 
@@ -227,6 +224,22 @@ async function writeBlobToFile(
   }
 }
 
+async function pickNonCollidingFilename(
+  dir: FileSystemDirectoryHandle,
+  recording: Recording,
+  currentOwnedFilename?: string,
+): Promise<string> {
+  for (let i = 1; i <= 99; i += 1) {
+    const candidate = buildDesiredNoteFilename(recording, i);
+    if (candidate === currentOwnedFilename) return candidate;
+    const read = await readFileStrict(dir, candidate);
+    if (read.status === 'error') throw read.error;
+    if (read.status === 'missing') return candidate;
+  }
+  const fallbackSuffix = recording.id.slice(-4);
+  return `${buildDesiredNoteFilename(recording).replace(/\.md$/, '')} (${fallbackSuffix}).md`;
+}
+
 export function getVaultExportFor(
   recording: Recording,
   vaultId: string | null | undefined,
@@ -239,7 +252,7 @@ export function needsVaultWrite(recording: Recording, activeVaultId: string | nu
   if (!activeVaultId) return false;
   const v = getVaultExportFor(recording, activeVaultId);
   if (!v) return true;
-  if (v.state === 'conflict') return false; // Wait for explicit user choice
+  if (v.state === 'conflict') return false;
   if (v.state !== 'written') return true;
   if (!v.audioWritten) return true;
   return v.lastExportedRevision < recording.revision;
@@ -251,39 +264,38 @@ export interface VaultWriteOutcome {
 }
 
 /**
- * Reserves the frozen filename via onReserveFilename BEFORE touching disk,
- * writes and closes audio before Markdown, treats only NotFoundError as file
- * absence, and requires explicit forceOverwrite whenever an existing vault note
- * differs from a trusted baseline (or has no baseline).
+ * Writes audio first (and closes it) before writing the Markdown note.
+ * Filenames follow "YYYY-MM-DD HH.MM - Concise Subject.md". When online
+ * transcription is about to title a brand-new clip (`deferMarkdown: true`),
+ * audio is written immediately and the Markdown file is written once Gemini
+ * returns the concise subject. On later title changes (Gemini titling an
+ * offline stub, or user inline rename), the new file is written first and the
+ * old file is removed only if it wasn't externally edited in Obsidian.
  */
 export async function writeRecordingToVault(params: {
   vault: StoredVaultHandle;
   recording: Recording;
   audioBlob: Blob | null;
   forceOverwrite?: boolean;
+  deferMarkdown?: boolean;
   onReserveFilename: (reserved: VaultExportState) => Promise<void>;
 }): Promise<VaultWriteOutcome> {
-  const { vault, recording, audioBlob, forceOverwrite = false, onReserveFilename } = params;
+  const {
+    vault,
+    recording,
+    audioBlob,
+    forceOverwrite = false,
+    deferMarkdown = false,
+    onReserveFilename,
+  } = params;
   const existingForVault = getVaultExportFor(recording, vault.vaultId);
-  const frozenFilename =
-    existingForVault?.filename || buildNoteFilename(recording, vault.vaultId);
+  const prevFilename = existingForVault?.filename || '';
+  const desiredBase = buildDesiredNoteFilename(recording);
 
   const audioFilename =
     recording.audioFilename ||
     recording.audioPath.split('/').pop() ||
     `${recording.id}.m4a`;
-
-  // Persist chosen filename BEFORE first filesystem write so a crash + title change cannot create a duplicate note
-  if (!existingForVault) {
-    await onReserveFilename({
-      vaultId: vault.vaultId,
-      filename: frozenFilename,
-      audioWritten: false,
-      lastExportedRevision: -1,
-      lastExportedHash: '',
-      state: 'unsynced',
-    });
-  }
 
   try {
     // 1. Ensure audio/ subfolder exists and verify attachment is present & non-empty
@@ -296,7 +308,7 @@ export async function writeRecordingToVault(params: {
           permissionLost: false,
           vaultState: {
             vaultId: vault.vaultId,
-            filename: frozenFilename,
+            filename: prevFilename || desiredBase,
             audioWritten: false,
             lastExportedRevision: existingForVault?.lastExportedRevision ?? -1,
             lastExportedHash: existingForVault?.lastExportedHash ?? '',
@@ -312,25 +324,114 @@ export async function writeRecordingToVault(params: {
       }
     }
 
+    // If online transcription is about to title a brand-new clip, stop after saving audio
+    // so the .md file lands on first write with its real "YYYY-MM-DD HH.MM - Subject.md" name.
+    if (deferMarkdown && !existingForVault?.lastExportedHash) {
+      return {
+        permissionLost: false,
+        vaultState: {
+          vaultId: vault.vaultId,
+          filename: '',
+          audioWritten: true,
+          lastExportedRevision: -1,
+          lastExportedHash: '',
+          state: 'unsynced',
+        },
+      };
+    }
+
     // 2. Build exact Markdown content & compute SHA-256
     const markdown = buildObsidianMarkdown(recording);
     const nextHash = await sha256Text(markdown);
 
-    // 3. Strictly inspect disk note before overwriting
-    const diskRead = await readFileStrict(vault.handle, frozenFilename);
-    if (diskRead.status === 'error') {
-      throw diskRead.error;
+    // 3. Determine whether we're updating in place or renaming to match the new subject
+    const wantsRename =
+      Boolean(prevFilename) &&
+      prevFilename !== desiredBase &&
+      !prevFilename.startsWith(desiredBase.replace(/\.md$/, ' ('));
+
+    if (wantsRename && prevFilename) {
+      // Check old file for external edits inside Obsidian before replacing/renaming
+      const oldRead = await readFileStrict(vault.handle, prevFilename);
+      if (oldRead.status === 'error') throw oldRead.error;
+      if (oldRead.status === 'exists' && !forceOverwrite) {
+        const oldHash = await sha256Text(oldRead.text);
+        const lastKnownHash = existingForVault?.lastExportedHash || '';
+        if (!lastKnownHash || oldHash !== lastKnownHash) {
+          return {
+            permissionLost: false,
+            vaultState: {
+              vaultId: vault.vaultId,
+              filename: prevFilename,
+              audioWritten: true,
+              lastExportedRevision: existingForVault?.lastExportedRevision ?? -1,
+              lastExportedHash: lastKnownHash,
+              state: 'conflict',
+              error:
+                'This note was edited in Obsidian since Tapeleaf last wrote it. Choose whether to overwrite or keep the Obsidian version.',
+              writtenAt: existingForVault?.writtenAt,
+            },
+          };
+        }
+      }
+
+      const targetFilename = await pickNonCollidingFilename(
+        vault.handle,
+        recording,
+        prevFilename,
+      );
+
+      // Write new file FIRST, commit new filename, then delete untouched old file
+      await writeBlobToFile(vault.handle, targetFilename, markdown);
+      const nextState: VaultExportState = {
+        vaultId: vault.vaultId,
+        filename: targetFilename,
+        audioWritten: true,
+        lastExportedRevision: recording.revision,
+        lastExportedHash: nextHash,
+        state: 'written',
+        writtenAt: new Date().toISOString(),
+      };
+      await onReserveFilename(nextState);
+
+      if (targetFilename !== prevFilename) {
+        try {
+          await vault.handle.removeEntry(prevFilename);
+        } catch (err) {
+          if (!isNotFoundError(err)) {
+            console.warn('Could not remove old renamed note:', err);
+          }
+        }
+      }
+
+      return { permissionLost: false, vaultState: nextState };
     }
+
+    // 4. First-time write or same-filename update
+    let targetFilename = prevFilename;
+    if (!targetFilename) {
+      targetFilename = await pickNonCollidingFilename(vault.handle, recording);
+      await onReserveFilename({
+        vaultId: vault.vaultId,
+        filename: targetFilename,
+        audioWritten: true,
+        lastExportedRevision: -1,
+        lastExportedHash: '',
+        state: 'unsynced',
+      });
+    }
+
+    const diskRead = await readFileStrict(vault.handle, targetFilename);
+    if (diskRead.status === 'error') throw diskRead.error;
 
     if (diskRead.status === 'exists' && !forceOverwrite) {
       const diskHash = await sha256Text(diskRead.text);
       if (diskHash === nextHash) {
-        // Already identical on disk (e.g. crash between close() and IDB commit)
         return {
           permissionLost: false,
           vaultState: {
             vaultId: vault.vaultId,
-            filename: frozenFilename,
+            filename: targetFilename,
             audioWritten: true,
             lastExportedRevision: recording.revision,
             lastExportedHash: nextHash,
@@ -341,13 +442,12 @@ export async function writeRecordingToVault(params: {
       }
 
       const lastKnownHash = existingForVault?.lastExportedHash || '';
-      // Require confirmation if file has no trusted baseline OR changed externally in Obsidian
       if (!lastKnownHash || diskHash !== lastKnownHash) {
         return {
           permissionLost: false,
           vaultState: {
             vaultId: vault.vaultId,
-            filename: frozenFilename,
+            filename: targetFilename,
             audioWritten: true,
             lastExportedRevision: existingForVault?.lastExportedRevision ?? -1,
             lastExportedHash: lastKnownHash,
@@ -361,14 +461,13 @@ export async function writeRecordingToVault(params: {
       }
     }
 
-    // 4. Write Markdown note cleanly
-    await writeBlobToFile(vault.handle, frozenFilename, markdown);
+    await writeBlobToFile(vault.handle, targetFilename, markdown);
 
     return {
       permissionLost: false,
       vaultState: {
         vaultId: vault.vaultId,
-        filename: frozenFilename,
+        filename: targetFilename,
         audioWritten: true,
         lastExportedRevision: recording.revision,
         lastExportedHash: nextHash,
@@ -387,7 +486,7 @@ export async function writeRecordingToVault(params: {
       permissionLost,
       vaultState: {
         vaultId: vault.vaultId,
-        filename: frozenFilename,
+        filename: prevFilename,
         audioWritten: existingForVault?.audioWritten ?? false,
         lastExportedRevision: existingForVault?.lastExportedRevision ?? -1,
         lastExportedHash: existingForVault?.lastExportedHash ?? '',
@@ -399,11 +498,6 @@ export async function writeRecordingToVault(params: {
   }
 }
 
-/**
- * Explicit opt-in deletion from the connected Obsidian folder. Treats ONLY
- * NotFoundError as already removed; surfaces permission or I/O failures so
- * partial deletions are never hidden.
- */
 export async function deleteRecordingFromVault(
   vault: StoredVaultHandle,
   recording: Recording,
@@ -415,12 +509,14 @@ export async function deleteRecordingFromVault(
   const errors: string[] = [];
   let permissionLost = false;
 
-  try {
-    await vault.handle.removeEntry(filename);
-  } catch (err) {
-    if (!isNotFoundError(err)) {
-      if (isPermissionError(err)) permissionLost = true;
-      errors.push(`note (${filename}): ${err instanceof Error ? err.message : 'delete failed'}`);
+  if (filename) {
+    try {
+      await vault.handle.removeEntry(filename);
+    } catch (err) {
+      if (!isNotFoundError(err)) {
+        if (isPermissionError(err)) permissionLost = true;
+        errors.push(`note (${filename}): ${err instanceof Error ? err.message : 'delete failed'}`);
+      }
     }
   }
 
