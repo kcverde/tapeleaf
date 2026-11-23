@@ -556,6 +556,27 @@ describe('Gemini response validation and error classification', () => {
     assert.deepEqual(res.tags, ['travel', 'personal-ideas']);
   });
 
+  it('distinguishes upload and transcription timeouts from service failures', () => {
+    const upload = classifyGeminiError(new DOMException('expired', 'TimeoutError'), 'upload');
+    assert.equal(upload.kind, 'transient');
+    assert.match(upload.message, /audio upload timed out/i);
+    const generation = classifyGeminiError(new Error('request timed out'), 'transcription');
+    assert.match(generation.message, /transcription timed out/i);
+    const deadline = classifyGeminiError(
+      new Error(JSON.stringify({ error: { code: 504, status: 'DEADLINE_EXCEEDED' } })),
+      'preparation',
+    );
+    assert.match(deadline.message, /audio preparation timed out/i);
+    const busy = classifyGeminiError(
+      new Error(JSON.stringify({ error: { code: 503, message: 'Service unavailable' } })),
+      'transcription',
+    );
+    assert.equal(busy.kind, 'transient');
+    assert.match(busy.message, /temporarily unavailable/i);
+    assert.doesNotMatch(busy.message, /timed out/i);
+    assert.equal(classifyGeminiError(upload, 'transcription'), upload);
+  });
+
   it('classifies auth, quota, timeout, and stale dynamic-import errors accurately', () => {
     assert.equal(
       classifyGeminiError(new Error(JSON.stringify({ error: { code: 401 } }))).kind,

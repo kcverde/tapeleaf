@@ -12,8 +12,10 @@ export const AVAILABLE_MODELS = [
 ] as const;
 
 export const INLINE_LIMIT_BYTES = 12 * 1024 * 1024; // 12 MiB inline base64 cutoff
-const GENERATE_TIMEOUT_MS = 90_000;
-const FILES_POLL_TIMEOUT_MS = 60_000;
+// Hour-long recordings need time both to upload on mobile and to produce a full transcript.
+const UPLOAD_TIMEOUT_MS = 10 * 60_000;
+const GENERATE_TIMEOUT_MS = 10 * 60_000;
+const FILES_POLL_TIMEOUT_MS = 5 * 60_000;
 const RETRY_DELAYS_MS = [1500, 3500];
 
 const KEY_SESSION_STORAGE_LEGACY = 'tapeleaf-gemini-key-session';
@@ -310,19 +312,17 @@ export function parseAndValidateAnalysis(rawText: string): AudioAnalysisResult {
   };
 }
 
-export function classifyGeminiError(err: unknown): GeminiClientError {
+type GeminiRequestStage = 'request' | 'upload' | 'preparation' | 'transcription';
+
+export function classifyGeminiError(
+  err: unknown,
+  stage: GeminiRequestStage = 'request',
+): GeminiClientError {
   if (err instanceof GeminiClientError) return err;
 
   const errName = err instanceof Error || err instanceof DOMException ? err.name : '';
   const raw = err instanceof Error ? err.message : String(err ?? 'Unknown error');
   const trimmed = raw.trim();
-
-  if (errName === 'TimeoutError' || errName === 'AbortError') {
-    return new GeminiClientError(
-      'transient',
-      'Gemini request timed out. Your audio is safe — tap Retry in a moment.',
-    );
-  }
 
   let code: number | undefined;
   let status: string | undefined;
@@ -403,20 +403,31 @@ export function classifyGeminiError(err: unknown): GeminiClientError {
   }
 
   if (
-    code === 500 ||
-    code === 503 ||
+    errName === 'TimeoutError' ||
+    errName === 'AbortError' ||
     code === 504 ||
-    status === 'UNAVAILABLE' ||
-    status === 'INTERNAL' ||
     status === 'DEADLINE_EXCEEDED' ||
-    lower.includes('high demand') ||
-    lower.includes('temporarily unavailable') ||
     lower.includes('timed out') ||
     lower.includes('timeout')
   ) {
+    const label = stage === 'upload' || stage === 'preparation' ? `audio ${stage}` : stage;
     return new GeminiClientError(
       'transient',
-      'Gemini is temporarily busy or timed out. Your audio is safe — tap Retry in a moment.',
+      `Gemini ${label} timed out. Your audio is safe — keep Tapeleaf open and tap Retry.`,
+    );
+  }
+
+  if (
+    code === 500 ||
+    code === 503 ||
+    status === 'UNAVAILABLE' ||
+    status === 'INTERNAL' ||
+    lower.includes('high demand') ||
+    lower.includes('temporarily unavailable')
+  ) {
+    return new GeminiClientError(
+      'transient',
+      'Gemini is temporarily unavailable. Your audio is safe — tap Retry in a moment.',
     );
   }
 
@@ -495,6 +506,7 @@ export async function analyzeAudioBlob(params: {
   const prompt = buildPrompt(params.existingTags);
 
   let uploadedFileName: string | undefined;
+  let stage: GeminiRequestStage = 'upload';
 
   try {
     let mediaPart:
@@ -520,7 +532,8 @@ export async function analyzeAudioBlob(params: {
         file: uploadBlob,
         config: {
           mimeType,
-          abortSignal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
+          httpOptions: { timeout: UPLOAD_TIMEOUT_MS },
+          abortSignal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
         },
       });
       uploadedFileName = uploaded.name;
@@ -528,6 +541,7 @@ export async function analyzeAudioBlob(params: {
         await addPendingRemoteDelete(uploadedFileName);
       }
 
+      stage = 'preparation';
       let activeFile = uploaded;
       const deadline = Date.now() + FILES_POLL_TIMEOUT_MS;
       while (activeFile.state === 'PROCESSING' && activeFile.name) {
@@ -545,7 +559,7 @@ export async function analyzeAudioBlob(params: {
             },
           });
         } catch (pollErr) {
-          const classified = classifyGeminiError(pollErr);
+          const classified = classifyGeminiError(pollErr, stage);
           if (classified.kind === 'transient' && deadline - Date.now() > 1500) {
             continue;
           }
@@ -568,6 +582,7 @@ export async function analyzeAudioBlob(params: {
       };
     }
 
+    stage = 'transcription';
     let lastError: GeminiClientError | null = null;
     for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
       try {
@@ -606,7 +621,7 @@ export async function analyzeAudioBlob(params: {
 
         return parseAndValidateAnalysis(text);
       } catch (err) {
-        const classified = classifyGeminiError(err);
+        const classified = classifyGeminiError(err, stage);
         lastError = classified;
         if (classified.kind !== 'transient') {
           throw classified;
@@ -620,7 +635,7 @@ export async function analyzeAudioBlob(params: {
 
     throw lastError ?? new GeminiClientError('other', 'Transcription failed.');
   } catch (err) {
-    throw classifyGeminiError(err);
+    throw classifyGeminiError(err, stage);
   } finally {
     if (uploadedFileName) {
       await ai.files
