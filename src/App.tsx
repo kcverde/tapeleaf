@@ -997,17 +997,29 @@ export default function App() {
 
   return (
     <div className="relative h-dvh w-full overflow-hidden bg-[var(--canvas)] text-[var(--ink)] flex flex-col-reverse lg:flex-row">
-      {/* Viewport-level live region toast (visible in both mobile list & detail views) */}
+      {/* Viewport-level live region toast + update pill (visible in both mobile list & detail views) */}
       <div
         aria-live="polite"
         aria-atomic="true"
-        className="pointer-events-none fixed top-3 left-1/2 -translate-x-1/2 z-40"
+        className="pointer-events-none fixed top-3 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-2"
       >
         {savedToast && (
           <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--ink)] shadow-md">
             <Check className="h-3.5 w-3.5" />
             {savedToast}
           </span>
+        )}
+        {canApplySwUpdate && (
+          <div className="pointer-events-auto flex items-center gap-2.5 rounded-full border border-[var(--border-strong)] bg-[var(--surface)] pl-3.5 pr-1.5 py-1 text-[12.5px] shadow-md">
+            <span className="text-[var(--ink-secondary)]">New version ready</span>
+            <button
+              type="button"
+              onClick={() => pendingSwUpdate?.applyUpdate()}
+              className="rounded-full bg-[var(--ink)] px-3 py-1 text-[12px] font-medium text-[var(--canvas)] hover:opacity-90 cursor-pointer"
+            >
+              Update
+            </button>
+          </div>
         )}
       </div>
 
@@ -1087,19 +1099,6 @@ export default function App() {
 
           {/* Quiet Contextual Banners */}
           <div className="px-4 sm:px-5 space-y-2 shrink-0">
-            {canApplySwUpdate && (
-              <div className="mb-2 flex items-center justify-between gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-[12.5px]">
-                <span className="text-[var(--ink-secondary)]">New version ready</span>
-                <button
-                  type="button"
-                  onClick={() => pendingSwUpdate?.applyUpdate()}
-                  className="rounded-lg bg-[var(--ink)] px-2.5 py-1 text-[12px] font-medium text-[var(--canvas)] cursor-pointer"
-                >
-                  Update
-                </button>
-              </div>
-            )}
-
             {vault && vaultPermission === 'prompt' && (
               <div className="mb-2 rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] px-3.5 py-2.5 text-[13px] space-y-2">
                 <div className="flex items-center justify-between gap-2">

@@ -350,6 +350,24 @@ export function classifyGeminiError(err: unknown): GeminiClientError {
 
   const lower = message.toLowerCase();
 
+  // Stale lazy-chunk import after a new static deployment replaced hashed assets
+  if (
+    lower.includes('dynamically imported module') ||
+    lower.includes('importing a module script failed') ||
+    lower.includes('chunkloaderror')
+  ) {
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      void navigator.serviceWorker
+        .getRegistration()
+        .then((reg) => reg?.update())
+        .catch(() => {});
+    }
+    return new GeminiClientError(
+      'other',
+      'Tapeleaf updated in the background. Tap Update or refresh the app, then tap Retry processing — your audio is safe.',
+    );
+  }
+
   if (
     (typeof navigator !== 'undefined' && navigator.onLine === false && code === undefined) ||
     lower.includes('failed to fetch') ||

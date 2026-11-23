@@ -459,7 +459,7 @@ describe('Gemini response validation and error classification', () => {
     assert.deepEqual(res.tags, ['travel', 'personal-ideas']);
   });
 
-  it('classifies auth, quota, and timeout errors accurately', () => {
+  it('classifies auth, quota, timeout, and stale dynamic-import errors accurately', () => {
     assert.equal(
       classifyGeminiError(new Error(JSON.stringify({ error: { code: 401 } }))).kind,
       'auth',
@@ -469,6 +469,14 @@ describe('Gemini response validation and error classification', () => {
       'quota',
     );
     assert.equal(classifyGeminiError(new DOMException('timed out', 'TimeoutError')).kind, 'transient');
+
+    const chunkErr = classifyGeminiError(
+      new TypeError(
+        'Failed to fetch dynamically imported module: https://kcverde.github.io/tapeleaf/assets/web-B5-VRfol.js',
+      ),
+    );
+    assert.equal(chunkErr.kind, 'other');
+    assert.match(chunkErr.message, /updated in the background/i);
   });
 });
 

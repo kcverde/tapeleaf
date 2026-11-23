@@ -47,10 +47,11 @@ export function buildWebManifest(base: string) {
 
 /**
  * Generates manifest.webmanifest (for both dev and build from one definition)
- * and a release-atomic sw.js hashed from offline-critical shipped files.
- * Excludes the online-only Gemini SDK chunk from mandatory offline precache so
- * install stays lean on mobile, uses a single canonical shell URL, namespaces
- * cache cleanup by deployment scope, and never intercepts cross-origin calls.
+ * and a release-atomic sw.js hashed from ALL shipped files (including lazy
+ * chunks like gemini-sdk so open tabs never 404 after a new deploy).
+ * Uses a single canonical shell URL, namespaces cache cleanup by deployment
+ * scope, retains the previous release cache for tabs deferring reload, and
+ * never intercepts cross-origin calls.
  */
 function tapeleafPwaPlugin(base: string): Plugin {
   let outDir = 'dist';
@@ -88,8 +89,6 @@ function tapeleafPwaPlugin(base: string): Plugin {
             walk(abs, relPath);
           } else if (entry.isFile()) {
             if (relPath === 'sw.js' || relPath.endsWith('.map')) continue;
-            // Online-only Gemini SDK chunk is fetched lazily when transcribing online
-            if (relPath.startsWith('assets/gemini-sdk-')) continue;
             files.push(relPath);
           }
         }
@@ -133,15 +132,18 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => {
-      // Namespace cleanup strictly to this deployment scope; keep one prior
-      // release cache alive so tabs deferring reload while recording stay intact.
-      const scopedOther = keys.filter(
-        (key) => key.startsWith(SCOPE_PREFIX) && key !== CACHE_NAME
-      );
-      const toDelete = scopedOther.slice(0, Math.max(0, scopedOther.length - 1));
-      return Promise.all(toDelete.map((key) => caches.delete(key)));
-    })
+    caches
+      .keys()
+      .then((keys) => {
+        // Namespace cleanup strictly to this deployment scope; keep one prior
+        // release cache alive so tabs deferring reload while recording stay intact.
+        const scopedOther = keys.filter(
+          (key) => key.startsWith(SCOPE_PREFIX) && key !== CACHE_NAME
+        );
+        const toDelete = scopedOther.slice(0, Math.max(0, scopedOther.length - 1));
+        return Promise.all(toDelete.map((key) => caches.delete(key)));
+      })
+      .then(() => self.clients.claim())
   );
 });
 
