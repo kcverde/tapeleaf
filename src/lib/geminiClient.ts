@@ -17,6 +17,8 @@ const UPLOAD_TIMEOUT_MS = 10 * 60_000;
 const GENERATE_TIMEOUT_MS = 10 * 60_000;
 const FILES_POLL_TIMEOUT_MS = 5 * 60_000;
 const RETRY_DELAYS_MS = [1500, 3500];
+// Both models offered in Settings support this output limit.
+const MAX_TRANSCRIPT_OUTPUT_TOKENS = 65_536;
 
 const KEY_SESSION_STORAGE_LEGACY = 'tapeleaf-gemini-key-session';
 const KEY_LOCAL_STORAGE = 'tapeleaf-gemini-key-local';
@@ -203,7 +205,7 @@ function buildResponseSchema(TypeEnum: typeof import('@google/genai').Type) {
       englishTranslation: {
         type: TypeEnum.STRING,
         description:
-          'Clean, natural English translation of the full transcript (if spoken in English, match originalTranscript cleanly), preserving the exact same speaker labels and turn breaks when multiple speakers are present.',
+          'For non-English audio, a complete natural English translation preserving speaker labels and turn breaks. For English audio, return an empty string; the app reuses originalTranscript.',
       },
     },
     required: [
@@ -236,7 +238,8 @@ export function buildPrompt(existingTags: string[]): string {
     `- Assign 2 to 4 lowercase kebab-case tags. ${tagGuidance}`,
     '- Write a clean, well-punctuated transcript in originalTranscript (in the spoken language, using natural paragraph breaks and removing only meaningless stutter noise while staying faithful to what was said).',
     '- Speaker identification: if only one speaker is heard, write normal paragraphs with NO speaker labels. If multiple distinct speakers are heard, start each speaker turn on a new paragraph separated by a blank line and prefix it with a plain-text label followed by a colon and space (e.g. "Speaker 1: ...", "Speaker 2: ..."). If a speaker\'s name is clearly spoken or introduced in the audio, use that name consistently instead of "Speaker N". Do not wrap speaker labels in Markdown bold/asterisks, and keep speaker labels identical between originalTranscript and englishTranslation.',
-    '- Write a clean, natural English transcript in englishTranslation. If the clip is already in English, englishTranslation should be the clean English transcript.',
+    '- Transcribe the entire recording from beginning to end. Do not summarize, omit later sections, or replace speech with ellipses. Only the summary field should be brief.',
+    '- For non-English audio, write a complete natural English translation in englishTranslation. For English audio, put the full transcript in originalTranscript and return an empty string for englishTranslation; the app will reuse the original without generating a duplicate.',
     '- If the audio is silent or unintelligible, return languageCode "en", isEnglish true, a brief honest title like "Silent or unclear audio clip", a short summary explaining that no clear speech was detected, tags ["unclear"], and a brief honest transcript note.',
   ].join('\n');
 }
@@ -289,14 +292,24 @@ export function parseAndValidateAnalysis(rawText: string): AudioAnalysisResult {
   }
 
   const originalTranscript = asCleanString(obj.originalTranscript);
-  const englishTranslation = asCleanString(obj.englishTranslation) || originalTranscript;
+  const translatedTranscript = asCleanString(obj.englishTranslation);
+  const englishTranslation = isEnglish
+    ? originalTranscript || translatedTranscript
+    : translatedTranscript;
   const title = asSingleLine(obj.title).slice(0, 120);
   const summary = asSingleLine(obj.summary).slice(0, 280);
 
-  if (!title && !summary && !englishTranslation && !originalTranscript) {
+  if (!englishTranslation && !originalTranscript) {
     throw new GeminiClientError(
       'transient',
-      'Gemini returned an empty transcription object. Tap Retry to try again.',
+      'Gemini returned no transcript. Your audio is safe — tap Retry to try again.',
+    );
+  }
+
+  if (!isEnglish && (!originalTranscript || !englishTranslation)) {
+    throw new GeminiClientError(
+      'transient',
+      'Gemini omitted the original transcript or English translation. Your audio is safe — tap Retry.',
     );
   }
 
@@ -608,6 +621,10 @@ export async function analyzeAudioBlob(params: {
             },
           ],
           config: {
+            // Preserve compatibility with custom/legacy models stored in settings.
+            ...(AVAILABLE_MODELS.some((entry) => entry.id === model)
+              ? { maxOutputTokens: MAX_TRANSCRIPT_OUTPUT_TOKENS }
+              : {}),
             responseMimeType: 'application/json',
             responseSchema,
             abortSignal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
@@ -624,6 +641,15 @@ export async function analyzeAudioBlob(params: {
           throw new GeminiClientError(
             'other',
             `Gemini refused to transcribe this clip (${finishReason.toLowerCase()}). Your audio is still saved locally.`,
+          );
+        }
+
+        if (finishReason !== 'STOP') {
+          // Valid JSON can still be incomplete. Never publish it as a ready note,
+          // or automatically repeat the same request at the same output limit.
+          throw new GeminiClientError(
+            'other',
+            `Gemini returned an incomplete transcription. Your audio is safe. Details: transcription; finish reason ${finishReason || 'missing'}.`,
           );
         }
 

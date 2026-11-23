@@ -556,6 +556,31 @@ describe('Gemini response validation and error classification', () => {
     assert.deepEqual(res.tags, ['travel', 'personal-ideas']);
   });
 
+  it('uses the complete original English transcript instead of a second partial copy', () => {
+    const result = parseAndValidateAnalysis(JSON.stringify({
+      title: 'Long Recording', isEnglish: true,
+      originalTranscript: 'Beginning. Middle. End.', englishTranslation: 'Beginning.',
+    }));
+    assert.equal(result.englishTranslation, 'Beginning. Middle. End.');
+    const single = parseAndValidateAnalysis(JSON.stringify({
+      title: 'English Note', isEnglish: true,
+      originalTranscript: 'Full text.', englishTranslation: '',
+    }));
+    assert.equal(single.englishTranslation, 'Full text.');
+    assert.throws(() => parseAndValidateAnalysis(JSON.stringify({ title: 'No transcript' })),
+      /no transcript/i);
+  });
+
+  it('does not accept a missing translation as a complete non-English result', () => {
+    for (const missing of ['originalTranscript', 'englishTranslation']) {
+      const response = {
+        title: 'Spanish Note', isEnglish: false, languageCode: 'es',
+        originalTranscript: 'Hola.', englishTranslation: 'Hello.', [missing]: '',
+      };
+      assert.throws(() => parseAndValidateAnalysis(JSON.stringify(response)), /omitted/i);
+    }
+  });
+
   it('distinguishes upload and transcription timeouts from service failures', () => {
     const upload = classifyGeminiError(new DOMException('expired', 'TimeoutError'), 'upload');
     assert.equal(upload.kind, 'transient');

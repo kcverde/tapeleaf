@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
-import { analyzeAudioBlob, INLINE_LIMIT_BYTES } from '../src/lib/geminiClient';
+import { analyzeAudioBlob, INLINE_LIMIT_BYTES, DEFAULT_GEMINI_MODEL } from '../src/lib/geminiClient';
 
 it('gives transcription ten minutes in both the SDK and abort signal', async (t) => {
   const readerDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'FileReader');
@@ -26,6 +26,7 @@ it('gives transcription ten minutes in both the SDK and abort signal', async (t)
     requests++;
     assert.equal(new Headers(init.headers).get('X-Server-Timeout'), '600');
     assert.ok(init.signal);
+    assert.equal(JSON.parse(String(init.body)).generationConfig.maxOutputTokens, 65_536);
     return new Response(JSON.stringify({ candidates: [{
       finishReason: 'STOP',
       content: { parts: [{ text: JSON.stringify({
@@ -35,7 +36,7 @@ it('gives transcription ten minutes in both the SDK and abort signal', async (t)
     }] }), { headers: { 'Content-Type': 'application/json' } });
   });
   const result = await analyzeAudioBlob({
-    apiKey: 'test-only', model: 'gemini-test', blob: new Blob(['audio']),
+    apiKey: 'test-only', model: DEFAULT_GEMINI_MODEL, blob: new Blob(['audio']),
     mimeType: 'audio/m4a', existingTags: [],
   });
   assert.equal(result.originalTranscript, 'Complete transcript.');
@@ -63,3 +64,38 @@ it('gives large uploads ten minutes and identifies upload timeout failures', asy
   assert.ok(requests >= 1);
   assert.deepEqual(timeouts, [600_000]);
 });
+
+for (const finishReason of ['MAX_TOKENS', 'CONTINUATION', 'OTHER', '']) {
+  it(`rejects partial transcription with finish reason ${finishReason || 'missing'}`, async (t) => {
+    const readerDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'FileReader');
+    Object.defineProperty(globalThis, 'FileReader', {
+      configurable: true,
+      value: class {
+        result = 'data:audio/m4a;base64,YXVkaW8=';
+        onload?: () => void;
+        readAsDataURL() { this.onload?.(); }
+      },
+    });
+    t.after(() => {
+      if (readerDescriptor) Object.defineProperty(globalThis, 'FileReader', readerDescriptor);
+      else Reflect.deleteProperty(globalThis, 'FileReader');
+    });
+    let requests = 0;
+    t.mock.method(globalThis, 'fetch', async () => {
+      requests++;
+      // Even syntactically valid JSON must not count as a complete transcript.
+      return new Response(JSON.stringify({ candidates: [{
+        finishReason,
+        content: { parts: [{ text: JSON.stringify({
+          title: 'Partial Note', originalTranscript: 'Only the beginning.',
+          englishTranslation: 'Only the beginning.', isEnglish: true,
+        }) }] },
+      }] }), { headers: { 'Content-Type': 'application/json' } });
+    });
+    await assert.rejects(analyzeAudioBlob({
+      apiKey: 'test-only', model: DEFAULT_GEMINI_MODEL, blob: new Blob(['audio']),
+      mimeType: 'audio/m4a', existingTags: [],
+    }), /incomplete.*transcription.*finish reason/is);
+    assert.equal(requests, 1, 'Do not automatically repeat an incomplete response at the same limit');
+  });
+}
