@@ -457,10 +457,9 @@ export default function App() {
       setLoadingLibrary(true);
       setStorageError(null);
       try {
-        const [initialList, vaultConn, drafts] = await Promise.all([
+        const [initialList, vaultConn] = await Promise.all([
           listRecordings(),
           loadVaultConnection(),
-          listRecoverableDrafts().catch(() => [] as RecoverableDraft[]),
         ]);
         if (!active) return;
 
@@ -476,7 +475,13 @@ export default function App() {
         setVaultPermission(vaultConn.permission);
         vaultRef.current = vaultConn.stored;
         vaultPermRef.current = vaultConn.permission;
-        setRecoveredDrafts(drafts);
+
+        // Check isolated draft store non-blockingly so it never delays library paint
+        void listRecoverableDrafts()
+          .then((drafts) => {
+            if (active && drafts.length > 0) setRecoveredDrafts(drafts);
+          })
+          .catch(() => {});
 
         // Recover abandoned processing jobs asynchronously under the processing lock
         void recoverAbandonedJobs(navigator.onLine)
@@ -996,7 +1001,7 @@ export default function App() {
     recorderStatus !== 'idle' || unsavedCaptures.length > 0 || recoveredDrafts.length > 0;
 
   return (
-    <div className="relative h-dvh w-full overflow-hidden bg-[var(--canvas)] text-[var(--ink)] flex flex-col-reverse lg:flex-row">
+    <div className="fixed inset-0 w-full overflow-hidden bg-[var(--canvas)] text-[var(--ink)] flex flex-col-reverse lg:flex-row">
       {/* Viewport-level live region toast + update pill (visible in both mobile list & detail views) */}
       <div
         aria-live="polite"

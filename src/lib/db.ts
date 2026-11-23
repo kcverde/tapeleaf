@@ -12,15 +12,24 @@ import type {
 } from '../types';
 
 const DB_NAME = 'tapeleaf-pwa-v1';
-const DB_VERSION = 2;
+const DRAFT_DB_NAME = 'tapeleaf-drafts-v1';
+const DRAFT_DB_VERSION = 1;
 const STORE_RECORDINGS = 'recordings';
 const STORE_AUDIO = 'audio';
 const STORE_META = 'meta';
 const STORE_DRAFTS = 'drafts';
 const STORE_DRAFT_CHUNKS = 'draft_chunks';
+const DB_OPEN_TIMEOUT_MS = 6_000;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
+let draftDbPromise: Promise<IDBDatabase> | null = null;
 
+/**
+ * Opens `tapeleaf-pwa-v1` WITHOUT forcing a version bump so existing v1 installs
+ * (which may have another browser/PWA tab open without an onversionchange handler)
+ * open immediately without versionchange deadlocks, while already-upgraded v2
+ * installs also open cleanly without VersionError.
+ */
 function openDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
@@ -30,7 +39,37 @@ function openDb(): Promise<IDBDatabase> {
       return;
     }
 
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      dbPromise = null;
+      reject(
+        new Error(
+          'Local database took too long to open. Close any duplicate Tapeleaf tabs and tap Retry.',
+        ),
+      );
+    }, DB_OPEN_TIMEOUT_MS);
+
+    const finishResolve = (db: IDBDatabase) => {
+      if (settled) {
+        db.close();
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(db);
+    };
+
+    const finishReject = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      dbPromise = null;
+      reject(err);
+    };
+
+    const req = indexedDB.open(DB_NAME);
     req.onupgradeneeded = () => {
       const db = req.result;
       const tx = req.transaction;
@@ -46,27 +85,18 @@ function openDb(): Promise<IDBDatabase> {
       if (!recordingsStore.indexNames.contains('by_status')) {
         recordingsStore.createIndex('by_status', 'status', { unique: false });
       }
-
       if (!db.objectStoreNames.contains(STORE_AUDIO)) {
         db.createObjectStore(STORE_AUDIO, { keyPath: 'id' });
       }
       if (!db.objectStoreNames.contains(STORE_META)) {
         db.createObjectStore(STORE_META, { keyPath: 'key' });
       }
-      if (!db.objectStoreNames.contains(STORE_DRAFTS)) {
-        db.createObjectStore(STORE_DRAFTS, { keyPath: 'id' });
-      }
-      if (!db.objectStoreNames.contains(STORE_DRAFT_CHUNKS)) {
-        const chunkStore = db.createObjectStore(STORE_DRAFT_CHUNKS, { keyPath: 'key' });
-        chunkStore.createIndex('by_draftId', 'draftId', { unique: false });
-      }
     };
 
     req.onblocked = () => {
-      dbPromise = null;
-      reject(
+      finishReject(
         new Error(
-          'Local database upgrade is blocked by another open Tapeleaf tab. Close other tabs and retry.',
+          'Local database is blocked by another open Tapeleaf tab. Close other tabs and retry.',
         ),
       );
     };
@@ -80,15 +110,88 @@ function openDb(): Promise<IDBDatabase> {
       db.onclose = () => {
         dbPromise = null;
       };
-      resolve(db);
+      finishResolve(db);
     };
 
     req.onerror = () => {
-      dbPromise = null;
-      reject(req.error ?? new Error('Could not open local Tapeleaf database.'));
+      finishReject(req.error ?? new Error('Could not open local Tapeleaf database.'));
     };
   });
   return dbPromise;
+}
+
+/**
+ * Separate database for periodic mid-recording draft chunks so draft storage
+ * never forces a schema version upgrade on `tapeleaf-pwa-v1`.
+ */
+function openDraftDb(): Promise<IDBDatabase> {
+  if (draftDbPromise) return draftDbPromise;
+  draftDbPromise = new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      draftDbPromise = null;
+      reject(new Error('IndexedDB is not available in this browser context.'));
+      return;
+    }
+
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      draftDbPromise = null;
+      reject(new Error('Timed out opening local draft database.'));
+    }, DB_OPEN_TIMEOUT_MS);
+
+    const finishResolve = (db: IDBDatabase) => {
+      if (settled) {
+        db.close();
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(db);
+    };
+
+    const finishReject = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      draftDbPromise = null;
+      reject(err);
+    };
+
+    const req = indexedDB.open(DRAFT_DB_NAME, DRAFT_DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE_DRAFTS)) {
+        db.createObjectStore(STORE_DRAFTS, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORE_DRAFT_CHUNKS)) {
+        const chunkStore = db.createObjectStore(STORE_DRAFT_CHUNKS, { keyPath: 'key' });
+        chunkStore.createIndex('by_draftId', 'draftId', { unique: false });
+      }
+    };
+
+    req.onblocked = () => {
+      finishReject(new Error('Local draft database is blocked by another tab.'));
+    };
+
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onversionchange = () => {
+        db.close();
+        draftDbPromise = null;
+      };
+      db.onclose = () => {
+        draftDbPromise = null;
+      };
+      finishResolve(db);
+    };
+
+    req.onerror = () => {
+      finishReject(req.error ?? new Error('Could not open local draft database.'));
+    };
+  });
+  return draftDbPromise;
 }
 
 function reqToPromise<T>(req: IDBRequest<T>): Promise<T> {
@@ -395,10 +498,10 @@ export async function deleteRecordingLocal(id: string): Promise<void> {
   await txDone(tx);
 }
 
-// --- Mid-recording draft chunk persistence (crash/OS-kill recovery) ---
+// --- Mid-recording draft chunk persistence (isolated database) ---
 
 export async function upsertRecordingDraft(draft: RecordingDraft): Promise<void> {
-  const db = await openDb();
+  const db = await openDraftDb();
   const tx = db.transaction(STORE_DRAFTS, 'readwrite');
   tx.objectStore(STORE_DRAFTS).put(draft);
   await txDone(tx);
@@ -410,7 +513,7 @@ export async function appendDraftChunk(
   blob: Blob,
   durationSeconds: number,
 ): Promise<void> {
-  const db = await openDb();
+  const db = await openDraftDb();
   const tx = db.transaction([STORE_DRAFTS, STORE_DRAFT_CHUNKS], 'readwrite');
   const chunkRecord: DraftChunkRecord = {
     key: `${draftId}:${String(seq).padStart(6, '0')}`,
@@ -433,7 +536,7 @@ export async function appendDraftChunk(
 }
 
 export async function listRecoverableDrafts(): Promise<RecoverableDraft[]> {
-  const db = await openDb();
+  const db = await openDraftDb();
   const tx = db.transaction([STORE_DRAFTS, STORE_DRAFT_CHUNKS], 'readonly');
   const drafts = await reqToPromise<RecordingDraft[]>(tx.objectStore(STORE_DRAFTS).getAll());
   if (drafts.length === 0) return [];
@@ -456,7 +559,7 @@ export async function listRecoverableDrafts(): Promise<RecoverableDraft[]> {
 }
 
 export async function deleteRecordingDraft(draftId: string): Promise<void> {
-  const db = await openDb();
+  const db = await openDraftDb();
   const tx = db.transaction([STORE_DRAFTS, STORE_DRAFT_CHUNKS], 'readwrite');
   tx.objectStore(STORE_DRAFTS).delete(draftId);
   const chunkStore = tx.objectStore(STORE_DRAFT_CHUNKS);
