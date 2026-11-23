@@ -74,11 +74,53 @@ export function sanitizeFilenameSubject(raw: string): string {
 }
 
 /**
+ * Neutralizes active Obsidian / HTML / plugin syntax in untrusted inline text
+ * (titles, summaries, language names) and strips line breaks so headings and
+ * blockquotes stay single-line.
+ */
+export function sanitizeMarkdownInline(raw: string): string {
+  return raw
+    .replace(/\r?\n+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/<(?=[a-zA-Z!/%?])/g, '&lt;')
+    .replace(/\[\[/g, '\\[\\[')
+    .replace(/\]\]/g, '\\]\\]')
+    .replace(/`{3,}/g, '\\`\\`\\`')
+    .replace(
+      /\]\(\s*(?:javascript|data|vbscript|file|obsidian):/gi,
+      '](blocked:',
+    );
+}
+
+/**
+ * Neutralizes active Markdown/HTML/Obsidian plugin syntax inside model-generated
+ * transcript bodies (HTML tags, Templater `<%`, wikilink embeds `[[...]]`,
+ * fenced code blocks like ` ```dataviewjs `, and dangerous URI schemes) while
+ * keeping ordinary prose readable.
+ */
+export function sanitizeMarkdownBody(raw: string): string {
+  return raw
+    .replace(/\r\n?/g, '\n')
+    .trim()
+    .replace(/<(?=[a-zA-Z!/%?])/g, '&lt;')
+    .replace(/\[\[/g, '\\[\\[')
+    .replace(/\]\]/g, '\\]\\]')
+    .replace(/^(\s*)(`{3,}|~{3,})/gm, (_match, indent: string, fence: string) =>
+      `${indent}${fence.split('').map((ch) => `\\${ch}`).join('')}`,
+    )
+    .replace(
+      /\]\(\s*(?:javascript|data|vbscript|file|obsidian):/gi,
+      '](blocked:',
+    );
+}
+
+/**
  * Human-readable note title matching "YYYY-MM-DD HH:MM - Concise Subject".
  */
 export function formatNoteDisplayTitle(recording: Recording): string {
   const { date, timeColon } = formatLocalDateTime(recording.created);
-  const subject = recording.title.trim() || 'Voice Note';
+  const subject = recording.title.replace(/\r?\n+/g, ' ').trim() || 'Voice Note';
   return `${date} ${timeColon} - ${subject}`;
 }
 
@@ -109,21 +151,25 @@ function doubleQuoted(value: string): Scalar<string> {
 
 export function buildObsidianMarkdown(recording: Recording): string {
   const displayTitle = formatNoteDisplayTitle(recording);
+  const safeHeadingTitle = sanitizeMarkdownInline(displayTitle);
+  const safeLanguageName = sanitizeMarkdownInline(recording.languageName || 'Original');
+  const cleanSummary = sanitizeMarkdownInline(recording.summary);
+
   const frontmatter: Record<string, unknown> = {
     id: recording.id,
-    title: doubleQuoted(displayTitle),
+    title: doubleQuoted(safeHeadingTitle),
     created: recording.created,
     duration: doubleQuoted(formatDuration(recording.durationSeconds)),
     language: recording.language,
-    language_name: recording.languageName,
+    language_name: safeLanguageName,
     status: recording.status,
-    summary: doubleQuoted(recording.summary),
+    summary: doubleQuoted(cleanSummary),
     tags: recording.tags,
     audio: recording.audioPath,
   };
 
   if (recording.status === 'failed' && recording.errorMessage) {
-    frontmatter.error = doubleQuoted(recording.errorMessage);
+    frontmatter.error = doubleQuoted(recording.errorMessage.replace(/\r?\n+/g, ' ').trim());
   }
 
   const yamlBlock = YAML.stringify(frontmatter, {
@@ -133,34 +179,39 @@ export function buildObsidianMarkdown(recording: Recording): string {
   }).trimEnd();
 
   // Shortest-path wikilink resolves from both vault root AND nested subfolders (e.g. MyVault/Tapeleaf/)
-  const embedTarget =
+  const rawEmbed =
     recording.audioFilename || recording.audioPath.split('/').pop() || recording.audioPath;
+  const embedTarget = rawEmbed.replace(/[\[\]\r\n]+/g, '');
 
   const lines: string[] = [
     '---',
     yamlBlock,
     '---',
     '',
-    `# ${displayTitle}`,
+    `# ${safeHeadingTitle}`,
     '',
   ];
 
-  if (recording.summary.trim()) {
-    lines.push(`> ${recording.summary.trim().replace(/\r?\n+/g, ' ')}`, '');
+  if (cleanSummary) {
+    lines.push(`> ${sanitizeMarkdownInline(cleanSummary)}`, '');
   }
 
   lines.push(`![[${embedTarget}]]`, '');
   lines.push('## Transcript', '');
-  lines.push(recording.englishTranscript.trim() || '_Transcript pending…_');
+  const safeTranscript = sanitizeMarkdownBody(recording.englishTranscript);
+  lines.push(safeTranscript || '_Transcript pending…_');
 
   if (!recording.isEnglish && recording.originalTranscript?.trim()) {
-    lines.push(
-      '',
-      '<!-- tapeleaf:original -->',
-      `## Original (${recording.languageName})`,
-      '',
-    );
-    lines.push(recording.originalTranscript.trim());
+    const safeOriginal = sanitizeMarkdownBody(recording.originalTranscript);
+    if (safeOriginal) {
+      lines.push(
+        '',
+        '<!-- tapeleaf:original -->',
+        `## Original (${safeLanguageName})`,
+        '',
+      );
+      lines.push(safeOriginal);
+    }
   }
 
   return `${lines.join('\n')}\n`;

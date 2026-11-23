@@ -10,9 +10,10 @@
   --ink: #141210;
   --ink-secondary: #44403C;
   --ink-muted: #5E5853;
-  --vermilion: #E5484D;
-  --vermilion-hover: #D43D42;
-  --vermilion-soft: rgba(229, 72, 77, 0.14);
+  /* Accessible warm vermilion: ~5.0:1 contrast ratio with white text (WCAG AA) */
+  --vermilion: #D1383D;
+  --vermilion-hover: #BC2D32;
+  --vermilion-soft: rgba(209, 56, 61, 0.14);
   --pill-active-bg: #141210;
   --pill-active-ink: #FAF9F7;
   --code-bg: #F4F2ED;
@@ -31,9 +32,9 @@
   --ink: #FAFAFA;
   --ink-secondary: #E4E4E7;
   --ink-muted: #B8B8C2;
-  --vermilion: #E5484D;
-  --vermilion-hover: #EC5C61;
-  --vermilion-soft: rgba(229, 72, 77, 0.2);
+  --vermilion: #D1383D;
+  --vermilion-hover: #DE464B;
+  --vermilion-soft: rgba(209, 56, 61, 0.22);
   --pill-active-bg: #FAFAFA;
   --pill-active-ink: #0E0E10;
   --code-bg: #141418;
@@ -48,7 +49,8 @@
     height: 100%;
     background-color: var(--canvas);
     color: var(--ink);
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto,
+      Helvetica, Arial, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
@@ -62,7 +64,8 @@
   code,
   pre,
   .font-mono {
-    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+      'Liberation Mono', monospace;
   }
 }
 
@@ -107,12 +110,21 @@
     box-shadow: 0 0 0 0 var(--vermilion-soft);
   }
   50% {
-    box-shadow: 0 0 0 8px rgba(229, 72, 77, 0);
+    box-shadow: 0 0 0 8px rgba(209, 56, 61, 0);
   }
 }
 
 .record-pulse {
   animation: record-pulse 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-bar,
+  .record-pulse,
+  .animate-pulse,
+  .animate-spin {
+    animation: none !important;
+  }
 }
 
 /* Crisp custom range scrubber for native audio playback */

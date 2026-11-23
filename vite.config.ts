@@ -6,64 +6,79 @@ import type { Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
-function normalizeBase(raw: string | undefined): string {
+export function normalizeBase(raw: string | undefined): string {
   const trimmed = raw?.trim() || '/';
   const withLead = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
   return withLead.endsWith('/') ? withLead : `${withLead}/`;
 }
 
+export function buildWebManifest(base: string) {
+  return {
+    name: 'Tapeleaf',
+    short_name: 'Tapeleaf',
+    description:
+      'Calm offline-first voice recorder that writes Obsidian-ready Markdown notes and audio straight to your vault.',
+    start_url: base,
+    scope: base,
+    display: 'standalone',
+    background_color: '#FAF9F7',
+    theme_color: '#1C1917',
+    icons: [
+      {
+        src: `${base}icons/icon-192.png`,
+        sizes: '192x192',
+        type: 'image/png',
+        purpose: 'any maskable',
+      },
+      {
+        src: `${base}icons/icon-512.png`,
+        sizes: '512x512',
+        type: 'image/png',
+        purpose: 'any maskable',
+      },
+      {
+        src: `${base}icons/icon.svg`,
+        sizes: 'any',
+        type: 'image/svg+xml',
+      },
+    ],
+  };
+}
+
 /**
- * Emits manifest.webmanifest and a release-atomic sw.js hashed from ALL final
- * shipped files (index.html, JS/CSS bundles, manifest, and public icons).
- * Namespaces cache lookup and cleanup by deployment scope, keeps the previous
- * release cache alive for tabs deferring reload, revalidates mutable URLs on
- * install, and never intercepts cross-origin calls (e.g. Gemini API).
+ * Generates manifest.webmanifest (for both dev and build from one definition)
+ * and a release-atomic sw.js hashed from offline-critical shipped files.
+ * Excludes the online-only Gemini SDK chunk from mandatory offline precache so
+ * install stays lean on mobile, uses a single canonical shell URL, namespaces
+ * cache cleanup by deployment scope, and never intercepts cross-origin calls.
  */
 function tapeleafPwaPlugin(base: string): Plugin {
   let outDir = 'dist';
 
   return {
     name: 'tapeleaf-pwa',
-    apply: 'build',
+    configureServer(server) {
+      const manifestSource = `${JSON.stringify(buildWebManifest(base), null, 2)}\n`;
+      server.middlewares.use((req, res, next) => {
+        const reqPath = (req.url || '').split('?')[0];
+        if (reqPath === '/manifest.webmanifest' || reqPath === `${base}manifest.webmanifest`) {
+          res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+          res.end(manifestSource);
+          return;
+        }
+        next();
+      });
+    },
     configResolved(config) {
       outDir = path.resolve(config.root, config.build.outDir);
     },
     closeBundle() {
-      const manifestObj = {
-        name: 'Tapeleaf',
-        short_name: 'Tapeleaf',
-        description:
-          'Calm offline-first voice recorder that writes Obsidian-ready Markdown notes and audio straight to your vault.',
-        start_url: base,
-        scope: base,
-        display: 'standalone',
-        background_color: '#FAF9F7',
-        theme_color: '#1C1917',
-        icons: [
-          {
-            src: `${base}icons/icon-192.png`,
-            sizes: '192x192',
-            type: 'image/png',
-            purpose: 'any maskable',
-          },
-          {
-            src: `${base}icons/icon-512.png`,
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'any maskable',
-          },
-          {
-            src: `${base}icons/icon.svg`,
-            sizes: 'any',
-            type: 'image/svg+xml',
-          },
-        ],
-      };
+      if (!fs.existsSync(outDir)) return;
 
-      const manifestSource = `${JSON.stringify(manifestObj, null, 2)}\n`;
+      const manifestSource = `${JSON.stringify(buildWebManifest(base), null, 2)}\n`;
       fs.writeFileSync(path.join(outDir, 'manifest.webmanifest'), manifestSource, 'utf8');
 
-      // Walk final outDir to collect every shipped asset and hash exact final bytes
+      // Walk final outDir to collect shipped offline-critical assets and hash exact final bytes
       const files: string[] = [];
       const walk = (dir: string, rel = '') => {
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -73,6 +88,8 @@ function tapeleafPwaPlugin(base: string): Plugin {
             walk(abs, relPath);
           } else if (entry.isFile()) {
             if (relPath === 'sw.js' || relPath.endsWith('.map')) continue;
+            // Online-only Gemini SDK chunk is fetched lazily when transcribing online
+            if (relPath.startsWith('assets/gemini-sdk-')) continue;
             files.push(relPath);
           }
         }
@@ -82,7 +99,7 @@ function tapeleafPwaPlugin(base: string): Plugin {
 
       const buildHasher = crypto.createHash('sha256');
       buildHasher.update(`base:${base}\n`);
-      const precacheUrls = new Set<string>([base]);
+      const precacheUrls = new Set<string>();
       for (const relPath of files) {
         const bytes = fs.readFileSync(path.join(outDir, relPath));
         buildHasher.update(relPath);
@@ -117,7 +134,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) => {
-      // Namespace cleanup strictly to this deployment scope; keep the previous
+      // Namespace cleanup strictly to this deployment scope; keep one prior
       // release cache alive so tabs deferring reload while recording stay intact.
       const scopedOther = keys.filter(
         (key) => key.startsWith(SCOPE_PREFIX) && key !== CACHE_NAME
@@ -185,9 +202,24 @@ export default defineConfig(() => {
   return {
     base,
     plugins: [react(), tailwindcss(), tapeleafPwaPlugin(base)],
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('@google/genai')) {
+              return 'gemini-sdk';
+            }
+            return undefined;
+          },
+        },
+      },
+    },
     server: {
       port: 5173,
       host: '127.0.0.1',
+      fs: {
+        deny: ['.env', '.env.*', '**/data/**'],
+      },
     },
   };
 });

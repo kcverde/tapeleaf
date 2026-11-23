@@ -4,14 +4,17 @@ Calm, zero-server, offline-first personal voice recorder built for **Android + O
 
 ## How It Works (Zero Server)
 
-* **Offline-first PWA:** Release-atomic Service Worker caches the app shell so Tapeleaf launches from your Android Home Screen even in Airplane Mode. Recordings queue offline and transcribe automatically once you’re back online.
+* **Offline-first PWA:** Release-atomic Service Worker caches the app shell so Tapeleaf launches from your Android Home Screen even in Airplane Mode. Periodic audio chunks save to a local IndexedDB draft while recording for crash recovery, and completed clips queue offline and transcribe automatically once Tapeleaf is open online.
 * **Direct Obsidian Vault Folder Sync (Android Chrome 132+ / Desktop Chrome):**
-  * Uses the File System Access API (`showDirectoryPicker`) to write both `YYYY-MM-DD-<slug>-<id>.md` and `audio/<id>.<ext>` directly into a subfolder of your Obsidian vault in **Device storage**.
-  * Uses shortest-path embeds (`![[rec_....m4a]]`) so playback works whether you connect the vault root or a subfolder like `MyVault/Tapeleaf/`.
-  * Freezes note filenames on first export so Obsidian backlinks stay intact, detects external edits made inside Obsidian before overwriting, and keeps local deletion separate from vault deletion by default.
+  * Uses the File System Access API (`showDirectoryPicker`) to write both `YYYY-MM-DD HH.MM - Concise Subject.md` and `audio/<id>.<ext>` directly into a subfolder of your Obsidian vault in **Device storage**.
+  * Uses shortest-path embeds (`![[rec_....m4a]]`) so playback works whether you connect the vault root or a subfolder like `MyVault/Tapeleaf/`. Manual **Download Audio** uses the same embedded filename so manual `.md` + audio pairs resolve cleanly in Obsidian.
+  * Automatically renames notes cleanly when Gemini titles an offline stub or when you rename a note inline—persisting rename intent first, verifying the old file wasn't edited inside Obsidian before removing it, and checking hashes before deleting or overwriting externally modified Obsidian notes.
+  * Keeps local deletion separate from vault deletion by default.
   * **Android folder permission note:** Reopening an installed Android PWA after the OS restarts it may require a single tap on the **Reconnect** banner to re-authorize folder access—all notes stay safe in IndexedDB and flush to your vault folder automatically on reconnect.
   * **Obsidian Sync** picks up both the note and audio attachment automatically and syncs them across all your devices.
-* **BYO Gemini API Key:** Enter your key once in **Settings** (session-only by default, with an opt-in **Remember on this device** toggle). Calls Google’s Gemini API (`gemini-3.5-flash-lite`) directly from your browser—never stored in builds, logs, or third-party servers.
+* **BYO Gemini API Key:** Enter your key once in **Settings**. Session-only by default (held in JS memory only—clears on reload/close), with an opt-in **Remember key on this device** (`localStorage`) toggle. Calls Google’s Gemini API (`gemini-3.5-flash-lite` by default) directly from your browser.
+  * *Large clips (> 12 MB)* temporarily upload via the Gemini Files API and are deleted immediately after transcription (if interrupted, Google auto-expires uploads after 48 hours and Tapeleaf retries cleanup on your next session).
+  * *Origin isolation tip:* Because `localStorage` and IndexedDB are scoped per browser origin, prefer hosting Tapeleaf on its **own dedicated origin** (e.g., Cloudflare Pages / Vercel / custom domain) rather than a shared `<user>.github.io/<repo>/` subpath if you host other sites under the same GitHub Pages account, and apply API key restrictions in Google AI Studio.
 
 ## Setup on Android
 
@@ -24,15 +27,25 @@ Calm, zero-server, offline-first personal voice recorder built for **Android + O
 
 ## Local Development
 
+Requires **Node.js 24+** (matching CI).
+
 ```bash
 npm install
 npm run dev
 # Open http://127.0.0.1:5173
 ```
 
+Run checks & tests:
+
+```bash
+npm run typecheck
+npm test
+npm run build
+```
+
 ## Deploy Free (Static Hosting, Automatic HTTPS)
 
 Because Tapeleaf is a 100% static Vite build (`dist/`), you can host it anywhere for free with zero backend maintenance:
 
-* **Cloudflare Pages / Vercel / Netlify:** Connect the `kcverde/tapeleaf` repo with build command `npm run build` and output directory `dist`.
-* **GitHub Pages (subpath `/tapeleaf/`):** Build with `VITE_BASE_PATH=/tapeleaf/ npm run build` and publish `dist/` (both `manifest.webmanifest` and `sw.js` automatically adapt to `VITE_BASE_PATH`).
+* **Cloudflare Pages / Vercel / Netlify (Recommended — dedicated origin):** Connect the `kcverde/tapeleaf` repo with build command `npm run build` and output directory `dist`.
+* **GitHub Pages (subpath `/tapeleaf/`):** Build with `VITE_BASE_PATH=/tapeleaf/ npm run build` and publish `dist/` (both `manifest.webmanifest` and `sw.js` automatically adapt to `VITE_BASE_PATH`; note that `<user>.github.io` shares browser storage across all repos published on that host).

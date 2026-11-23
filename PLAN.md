@@ -1,5 +1,7 @@
 # Tapeleaf — Lean Markdown-First Voice Recorder Plan
 
+> **Historical note:** This document reflects Tapeleaf's initial Hono + Docker + server-storage design prior to the zero-server Android PWA rewrite (`abc019d`). See [README.md](./README.md) for the current client-only PWA architecture, Obsidian File System Access sync, and deployment instructions.
+
 **Tapeleaf** is a calm, low-friction personal replacement for `recorder.google.com` built around **Obsidian-ready Markdown files**. Tap **Record**, tap **Stop**, and within seconds your clip is safely saved, language-detected, transcribed, translated to English (when non-English), titled, summarized in one line, tagged, and written out as a clean `.md` note with YAML frontmatter—ready to use directly with Obsidian.
 
 > Refined with Codex (`gpt-6.2-sol`). Keep it simple, beautiful, and easy to maintain. Do **not** over-engineer; extensive automated testing is not required.

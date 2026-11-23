@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Check,
   ExternalLink,
@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { AVAILABLE_MODELS, verifyGeminiApiKey } from '../lib/geminiClient';
 import { getStorageStats } from '../lib/db';
+import type { SwRegistrationStatus } from '../lib/swRegistration';
 import type { VaultPermissionState } from '../lib/vaultSync';
 import { formatBytes } from '../markdown';
 import type { StoredVaultHandle } from '../types';
@@ -31,6 +32,7 @@ interface SettingsModalProps {
   vaultPermission: VaultPermissionState;
   pendingVaultCount: number;
   recordingCount: number;
+  swStatus: SwRegistrationStatus | null;
   onConnectVault: () => Promise<void>;
   onReconnectVault: () => Promise<void>;
   onDisconnectVault: () => Promise<void>;
@@ -41,6 +43,14 @@ function maskApiKey(key: string): string {
   const trimmed = key.trim();
   if (trimmed.length <= 8) return '••••••••';
   return `${trimmed.slice(0, 4)}••••••••••••${trimmed.slice(-4)}`;
+}
+
+function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((el) => el.offsetParent !== null);
 }
 
 export function SettingsModal({
@@ -54,6 +64,7 @@ export function SettingsModal({
   vaultPermission,
   pendingVaultCount,
   recordingCount,
+  swStatus,
   onConnectVault,
   onReconnectVault,
   onDisconnectVault,
@@ -73,10 +84,35 @@ export function SettingsModal({
     quotaBytes: number;
   } | null>(null);
 
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const testRequestGenRef = useRef(0);
+  const testAbortRef = useRef<AbortController | null>(null);
+
   const hasSavedKey = Boolean(apiKey.trim());
 
+  const cancelInFlightKeyTest = () => {
+    testRequestGenRef.current += 1;
+    testAbortRef.current?.abort();
+    testAbortRef.current = null;
+    setTestingKey(false);
+  };
+
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      cancelInFlightKeyTest();
+      const prev = previousFocusRef.current;
+      previousFocusRef.current = null;
+      if (prev && typeof prev.focus === 'function') {
+        prev.focus();
+      }
+      return;
+    }
+
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
     setEditingKey(!apiKey.trim());
     setKeyDraft('');
     setRememberDraft(rememberKey);
@@ -84,12 +120,47 @@ export function SettingsModal({
     setKeyFeedback(null);
     setVaultMessage(null);
     void getStorageStats().then(setStorageStats);
+
+    // Move initial focus inside dialog
+    const raf = requestAnimationFrame(() => {
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const autoTarget = dialog.querySelector<HTMLElement>('[data-autofocus]');
+      if (autoTarget) {
+        autoTarget.focus();
+      } else {
+        closeButtonRef.current?.focus();
+      }
+    });
+
+    return () => cancelAnimationFrame(raf);
+    // Intentionally reset draft state only when the modal opens/closes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+        return;
+      }
+      if (e.key === 'Tab' && dialogRef.current) {
+        const focusable = getFocusableElements(dialogRef.current);
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first || !dialogRef.current.contains(document.activeElement)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else if (document.activeElement === last || !dialogRef.current.contains(document.activeElement)) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -97,9 +168,15 @@ export function SettingsModal({
 
   if (!open) return null;
 
+  const knownModelIds = AVAILABLE_MODELS.map((m) => m.id as string);
+  const modelOptions = knownModelIds.includes(model)
+    ? [...AVAILABLE_MODELS]
+    : [...AVAILABLE_MODELS, { id: model, label: `${model} (Custom)` }];
+
   const handleSaveNewKey = () => {
     const clean = keyDraft.trim();
     if (!clean) return;
+    cancelInFlightKeyTest();
     onSaveGemini({
       apiKey: clean,
       rememberOnDevice: rememberDraft,
@@ -110,11 +187,14 @@ export function SettingsModal({
     setEditingKey(false);
     setKeyFeedback({
       ok: true,
-      text: rememberDraft ? 'Key saved on this device.' : 'Key saved for this session.',
+      text: rememberDraft
+        ? 'Key saved on this device.'
+        : 'Key saved in memory for this session only.',
     });
   };
 
   const handleClearKey = () => {
+    cancelInFlightKeyTest();
     onSaveGemini({
       apiKey: '',
       rememberOnDevice: false,
@@ -138,12 +218,13 @@ export function SettingsModal({
         ok: true,
         text: nextRemember
           ? 'Saved on this device (persists across restarts).'
-          : 'Switched to session-only (clears when closed).',
+          : 'Switched to session-only memory (clears when closed).',
       });
     }
   };
 
   const handleModelChange = (nextModel: string) => {
+    cancelInFlightKeyTest();
     onSaveGemini({
       apiKey,
       rememberOnDevice: rememberKey,
@@ -152,16 +233,32 @@ export function SettingsModal({
   };
 
   const handleTestKey = async (targetKey: string, saveIfValid: boolean) => {
+    cancelInFlightKeyTest();
+    const requestGen = testRequestGenRef.current;
+    const controller = new AbortController();
+    testAbortRef.current = controller;
+
+    const cleanTarget = targetKey.trim();
+    const targetRemember = rememberDraft;
+    const targetModel = model;
+
     setTestingKey(true);
     setKeyFeedback(null);
-    const res = await verifyGeminiApiKey(targetKey);
+    const res = await verifyGeminiApiKey(cleanTarget, targetModel, controller.signal);
+
+    if (testRequestGenRef.current !== requestGen) {
+      return;
+    }
+
+    testAbortRef.current = null;
     setTestingKey(false);
     setKeyFeedback({ ok: res.ok, text: res.message });
-    if (res.ok && saveIfValid && targetKey.trim()) {
+
+    if (res.ok && saveIfValid && cleanTarget) {
       onSaveGemini({
-        apiKey: targetKey.trim(),
-        rememberOnDevice: rememberDraft,
-        model,
+        apiKey: cleanTarget,
+        rememberOnDevice: targetRemember,
+        model: targetModel,
       });
       setKeyDraft('');
       setShowKey(false);
@@ -191,19 +288,25 @@ export function SettingsModal({
       className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/45 backdrop-blur-[2px] p-0 sm:p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="Tapeleaf settings"
+      aria-labelledby="tapeleaf-settings-title"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-full sm:max-w-[480px] max-h-[90dvh] overflow-y-auto rounded-t-3xl sm:rounded-3xl border border-[var(--border)] bg-[var(--surface)] text-[var(--ink)] shadow-2xl">
+      <div
+        ref={dialogRef}
+        className="w-full sm:max-w-[480px] max-h-[90dvh] overflow-y-auto rounded-t-3xl sm:rounded-3xl border border-[var(--border)] bg-[var(--surface)] text-[var(--ink)] shadow-2xl"
+      >
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-[var(--border)] bg-[var(--surface)]/95 backdrop-blur-md px-5 py-4">
-          <h2 className="text-[17px] font-semibold tracking-[-0.015em]">Settings</h2>
+          <h2 id="tapeleaf-settings-title" className="text-[17px] font-semibold tracking-[-0.015em]">
+            Settings
+          </h2>
           <button
+            ref={closeButtonRef}
             type="button"
             onClick={onClose}
             aria-label="Close settings"
-            className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer"
+            className="flex h-10 w-10 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--ink)] cursor-pointer"
           >
             <X className="h-4 w-4" />
           </button>
@@ -223,7 +326,7 @@ export function SettingsModal({
               <p className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] p-3.5 text-[13.5px] leading-relaxed text-[var(--ink-secondary)]">
                 Direct folder writing requires Chrome on Android (v132+) or Desktop Chrome/Edge.
                 You can still use <strong>Copy MD</strong>, <strong>Download .md</strong>, and{' '}
-                <strong>Share Audio</strong> on this browser.
+                <strong>Download Audio</strong> (saved under the embedded filename for Obsidian).
               </p>
             ) : (
               <div className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] p-4 space-y-3">
@@ -354,7 +457,6 @@ export function SettingsModal({
 
             <div className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] p-4 space-y-4">
               {hasSavedKey && !editingKey ? (
-                /* SAVED KEY STATE: calm locked/masked summary with clear actions */
                 <div className="space-y-3">
                   <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)]/75 px-3.5 py-2.5">
                     <div className="min-w-0">
@@ -363,7 +465,7 @@ export function SettingsModal({
                       </p>
                       <p className="mt-0.5 inline-flex items-center gap-1 text-[12px] text-[var(--ink-muted)]">
                         <Check className="h-3 w-3 text-[var(--ink)]" />
-                        {rememberKey ? 'Saved on this device' : 'Saved for this session only'}
+                        {rememberKey ? 'Saved on this device' : 'In memory for this session only'}
                       </p>
                     </div>
                     <span className="shrink-0 rounded-full bg-[var(--surface)] border border-[var(--border)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--ink)]">
@@ -382,8 +484,8 @@ export function SettingsModal({
                       Remember key on this device
                       <span className="block text-[12px] text-[var(--ink-muted)]">
                         {rememberKey
-                          ? 'Stays saved after closing the app. Sent only to Google’s Gemini API.'
-                          : 'Session-only right now—clears when you close the app.'}
+                          ? 'Stored in browser localStorage for this origin. Restrict your key in Google AI Studio and host Tapeleaf on a dedicated origin.'
+                          : 'Session-only in memory—clears when you close or reload the app.'}
                       </span>
                     </span>
                   </label>
@@ -401,6 +503,7 @@ export function SettingsModal({
                     <button
                       type="button"
                       onClick={() => {
+                        cancelInFlightKeyTest();
                         setKeyDraft('');
                         setShowKey(false);
                         setKeyFeedback(null);
@@ -422,7 +525,6 @@ export function SettingsModal({
                   </div>
                 </div>
               ) : (
-                /* ADD / CHANGE KEY STATE */
                 <div className="space-y-3.5">
                   <div className="space-y-1.5">
                     <label
@@ -434,6 +536,7 @@ export function SettingsModal({
                     <div className="relative flex items-center">
                       <input
                         id="tapeleaf-api-key"
+                        data-autofocus={editingKey ? '' : undefined}
                         type={showKey ? 'text' : 'password'}
                         value={keyDraft}
                         onChange={(e) => setKeyDraft(e.target.value)}
@@ -446,7 +549,6 @@ export function SettingsModal({
                         placeholder="AIza..."
                         autoComplete="off"
                         spellCheck={false}
-                        autoFocus={editingKey}
                         className="h-11 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] pl-3.5 pr-11 font-mono text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--border-strong)] focus:outline-none"
                       />
                       <button
@@ -470,8 +572,8 @@ export function SettingsModal({
                     <span className="text-[13px] leading-snug text-[var(--ink-secondary)]">
                       Remember key on this device
                       <span className="block text-[12px] text-[var(--ink-muted)]">
-                        Off = session-only (clears when you close the app). Your key is sent only
-                        to Google’s Gemini API.
+                        Off = kept in memory only (clears on close/reload). On = stored in browser
+                        localStorage for this origin.
                       </span>
                     </span>
                   </label>
@@ -499,6 +601,7 @@ export function SettingsModal({
                       <button
                         type="button"
                         onClick={() => {
+                          cancelInFlightKeyTest();
                           setKeyDraft('');
                           setEditingKey(false);
                           setKeyFeedback(null);
@@ -514,6 +617,7 @@ export function SettingsModal({
 
               {keyFeedback && (
                 <p
+                  role="status"
                   className={[
                     'text-[12.5px] inline-flex items-center gap-1.5',
                     keyFeedback.ok ? 'text-[var(--ink-secondary)]' : 'text-[var(--vermilion)]',
@@ -524,7 +628,7 @@ export function SettingsModal({
                 </p>
               )}
 
-              <div className="border-t border-[var(--border)] pt-3.5 space-y-1.5">
+              <div className="border-t border-[var(--border)] pt-3.5 space-y-2">
                 <label
                   htmlFor="tapeleaf-model"
                   className="block text-[13px] font-medium text-[var(--ink-secondary)]"
@@ -537,21 +641,28 @@ export function SettingsModal({
                   onChange={(e) => handleModelChange(e.target.value)}
                   className="h-10 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 text-[13.5px] text-[var(--ink)] focus:border-[var(--border-strong)] focus:outline-none"
                 >
-                  {AVAILABLE_MODELS.map((m) => (
+                  {modelOptions.map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.label}
                     </option>
                   ))}
                 </select>
+                <p className="text-[12px] leading-relaxed text-[var(--ink-muted)]">
+                  Clips over 12 MB temporarily upload via Gemini Files API and are deleted right
+                  after transcription (if interrupted, Google auto-expires uploads after 48 hours
+                  and Tapeleaf retries cleanup next session).
+                </p>
               </div>
             </div>
           </section>
 
-          {/* Local Storage Info */}
+          {/* Local Storage & Offline Status */}
           <section className="space-y-2">
             <div className="flex items-center gap-2">
               <HardDrive className="h-4 w-4 text-[var(--ink-muted)]" />
-              <h3 className="text-[14.5px] font-semibold text-[var(--ink)]">On-Device Storage</h3>
+              <h3 className="text-[14.5px] font-semibold text-[var(--ink)]">
+                On-Device Storage &amp; Offline
+              </h3>
             </div>
             <div className="rounded-2xl border border-[var(--border)] bg-[var(--canvas)] px-4 py-3 flex items-center justify-between gap-3 text-[13px] text-[var(--ink-secondary)]">
               <span>
@@ -560,6 +671,11 @@ export function SettingsModal({
               </span>
               <span className="font-mono text-[11.5px] text-[var(--ink-muted)]">
                 {storageStats?.persisted ? 'Persistent' : 'Standard'}
+                {swStatus === 'ready'
+                  ? ' · Offline ready'
+                  : swStatus === 'error'
+                    ? ' · Offline cache unavailable'
+                    : ''}
               </span>
             </div>
           </section>

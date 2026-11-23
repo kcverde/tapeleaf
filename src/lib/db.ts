@@ -1,6 +1,10 @@
 import type {
   AudioRecord,
+  DraftChunkRecord,
+  RecoverableDraft,
   Recording,
+  RecordingDraft,
+  StoredRemoteDeletes,
   StoredVaultHandle,
   StoredVaultHistory,
   VaultExportState,
@@ -8,30 +12,77 @@ import type {
 } from '../types';
 
 const DB_NAME = 'tapeleaf-pwa-v1';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_RECORDINGS = 'recordings';
 const STORE_AUDIO = 'audio';
 const STORE_META = 'meta';
+const STORE_DRAFTS = 'drafts';
+const STORE_DRAFT_CHUNKS = 'draft_chunks';
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function openDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      dbPromise = null;
+      reject(new Error('IndexedDB is not available in this browser context.'));
+      return;
+    }
+
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
+      const tx = req.transaction;
+      let recordingsStore: IDBObjectStore;
       if (!db.objectStoreNames.contains(STORE_RECORDINGS)) {
-        db.createObjectStore(STORE_RECORDINGS, { keyPath: 'id' });
+        recordingsStore = db.createObjectStore(STORE_RECORDINGS, { keyPath: 'id' });
+      } else if (tx) {
+        recordingsStore = tx.objectStore(STORE_RECORDINGS);
+      } else {
+        return;
       }
+
+      if (!recordingsStore.indexNames.contains('by_status')) {
+        recordingsStore.createIndex('by_status', 'status', { unique: false });
+      }
+
       if (!db.objectStoreNames.contains(STORE_AUDIO)) {
         db.createObjectStore(STORE_AUDIO, { keyPath: 'id' });
       }
       if (!db.objectStoreNames.contains(STORE_META)) {
         db.createObjectStore(STORE_META, { keyPath: 'key' });
       }
+      if (!db.objectStoreNames.contains(STORE_DRAFTS)) {
+        db.createObjectStore(STORE_DRAFTS, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORE_DRAFT_CHUNKS)) {
+        const chunkStore = db.createObjectStore(STORE_DRAFT_CHUNKS, { keyPath: 'key' });
+        chunkStore.createIndex('by_draftId', 'draftId', { unique: false });
+      }
     };
-    req.onsuccess = () => resolve(req.result);
+
+    req.onblocked = () => {
+      dbPromise = null;
+      reject(
+        new Error(
+          'Local database upgrade is blocked by another open Tapeleaf tab. Close other tabs and retry.',
+        ),
+      );
+    };
+
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      db.onclose = () => {
+        dbPromise = null;
+      };
+      resolve(db);
+    };
+
     req.onerror = () => {
       dbPromise = null;
       reject(req.error ?? new Error('Could not open local Tapeleaf database.'));
@@ -132,7 +183,7 @@ export function generateRecordingId(): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   const date = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`;
   const time = `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
-  const bytes = new Uint8Array(4);
+  const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
   const suffix = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
   return `rec_${date}_${time}_${suffix}`;
@@ -143,6 +194,18 @@ export async function listRecordings(): Promise<Recording[]> {
   const tx = db.transaction(STORE_RECORDINGS, 'readonly');
   const all = await reqToPromise<Recording[]>(tx.objectStore(STORE_RECORDINGS).getAll());
   return all.sort((a, b) => Date.parse(b.created) - Date.parse(a.created));
+}
+
+export async function listRecordingsByStatus(
+  status: Recording['status'],
+): Promise<Recording[]> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_RECORDINGS, 'readonly');
+  const store = tx.objectStore(STORE_RECORDINGS);
+  const rows = store.indexNames.contains('by_status')
+    ? await reqToPromise<Recording[]>(store.index('by_status').getAll(status))
+    : (await reqToPromise<Recording[]>(store.getAll())).filter((r) => r.status === status);
+  return rows.sort((a, b) => Date.parse(a.created) - Date.parse(b.created));
 }
 
 export async function getRecording(id: string): Promise<Recording | null> {
@@ -187,19 +250,20 @@ export async function recoverAbandonedJobs(isOnline: boolean): Promise<Recording
     const db = await openDb();
     const tx = db.transaction(STORE_RECORDINGS, 'readwrite');
     const store = tx.objectStore(STORE_RECORDINGS);
-    const all = await reqToPromise<Recording[]>(store.getAll());
-    for (const rec of all) {
-      if (rec.status === 'processing') {
-        const updated: Recording = {
-          ...rec,
-          status: isOnline ? 'failed' : 'queued',
-          errorMessage: isOnline
-            ? 'Interrupted before transcription finished. Tap Retry processing.'
-            : undefined,
-          revision: (rec.revision ?? 0) + 1,
-        };
-        store.put(updated);
-      }
+    const processing = store.indexNames.contains('by_status')
+      ? await reqToPromise<Recording[]>(store.index('by_status').getAll('processing'))
+      : (await reqToPromise<Recording[]>(store.getAll())).filter((r) => r.status === 'processing');
+
+    for (const rec of processing) {
+      const updated: Recording = {
+        ...rec,
+        status: isOnline ? 'failed' : 'queued',
+        errorMessage: isOnline
+          ? 'Interrupted before transcription finished. Tap Retry processing.'
+          : undefined,
+        revision: (rec.revision ?? 0) + 1,
+      };
+      store.put(updated);
     }
     await txDone(tx);
     return listRecordings();
@@ -331,6 +395,82 @@ export async function deleteRecordingLocal(id: string): Promise<void> {
   await txDone(tx);
 }
 
+// --- Mid-recording draft chunk persistence (crash/OS-kill recovery) ---
+
+export async function upsertRecordingDraft(draft: RecordingDraft): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_DRAFTS, 'readwrite');
+  tx.objectStore(STORE_DRAFTS).put(draft);
+  await txDone(tx);
+}
+
+export async function appendDraftChunk(
+  draftId: string,
+  seq: number,
+  blob: Blob,
+  durationSeconds: number,
+): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_DRAFTS, STORE_DRAFT_CHUNKS], 'readwrite');
+  const chunkRecord: DraftChunkRecord = {
+    key: `${draftId}:${String(seq).padStart(6, '0')}`,
+    draftId,
+    seq,
+    blob,
+  };
+  tx.objectStore(STORE_DRAFT_CHUNKS).put(chunkRecord);
+
+  const draftStore = tx.objectStore(STORE_DRAFTS);
+  const existing = await reqToPromise<RecordingDraft | undefined>(draftStore.get(draftId));
+  if (existing) {
+    draftStore.put({
+      ...existing,
+      durationSeconds: Math.max(existing.durationSeconds, Math.round(durationSeconds)),
+      updatedAt: new Date().toISOString(),
+    });
+  }
+  await txDone(tx);
+}
+
+export async function listRecoverableDrafts(): Promise<RecoverableDraft[]> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_DRAFTS, STORE_DRAFT_CHUNKS], 'readonly');
+  const drafts = await reqToPromise<RecordingDraft[]>(tx.objectStore(STORE_DRAFTS).getAll());
+  if (drafts.length === 0) return [];
+
+  const chunkIndex = tx.objectStore(STORE_DRAFT_CHUNKS).index('by_draftId');
+  const results: RecoverableDraft[] = [];
+
+  for (const draft of drafts) {
+    const chunks = await reqToPromise<DraftChunkRecord[]>(chunkIndex.getAll(draft.id));
+    chunks.sort((a, b) => a.seq - b.seq);
+    const blobs = chunks.map((c) => c.blob).filter((b) => b && b.size > 0);
+    if (blobs.length === 0) continue;
+    const combined = new Blob(blobs, { type: draft.mimeType || 'audio/webm' });
+    if (combined.size > 0) {
+      results.push({ draft, blob: combined });
+    }
+  }
+
+  return results.sort((a, b) => Date.parse(b.draft.updatedAt) - Date.parse(a.draft.updatedAt));
+}
+
+export async function deleteRecordingDraft(draftId: string): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_DRAFTS, STORE_DRAFT_CHUNKS], 'readwrite');
+  tx.objectStore(STORE_DRAFTS).delete(draftId);
+  const chunkStore = tx.objectStore(STORE_DRAFT_CHUNKS);
+  const keys = await reqToPromise<IDBValidKey[]>(
+    chunkStore.index('by_draftId').getAllKeys(draftId),
+  );
+  for (const key of keys) {
+    chunkStore.delete(key);
+  }
+  await txDone(tx);
+}
+
+// --- Vault handle & history persistence ---
+
 export async function getStoredVaultHandle(): Promise<StoredVaultHandle | null> {
   const db = await openDb();
   const tx = db.transaction(STORE_META, 'readonly');
@@ -380,4 +520,60 @@ export async function rememberVaultHandleHistory(entry: VaultHistoryEntry): Prom
     entries: nextEntries,
   } satisfies StoredVaultHistory);
   await txDone(tx);
+}
+
+// --- Pending Gemini Files API remote delete queue ---
+
+export async function getPendingRemoteDeletes(): Promise<string[]> {
+  try {
+    const db = await openDb();
+    const tx = db.transaction(STORE_META, 'readonly');
+    const rec = await reqToPromise<StoredRemoteDeletes | undefined>(
+      tx.objectStore(STORE_META).get('gemini-pending-deletes'),
+    );
+    return rec?.names ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function addPendingRemoteDelete(fileName: string): Promise<void> {
+  if (!fileName) return;
+  try {
+    const db = await openDb();
+    const tx = db.transaction(STORE_META, 'readwrite');
+    const store = tx.objectStore(STORE_META);
+    const existing = await reqToPromise<StoredRemoteDeletes | undefined>(
+      store.get('gemini-pending-deletes'),
+    );
+    const next = Array.from(new Set([...(existing?.names ?? []), fileName])).slice(-50);
+    store.put({
+      key: 'gemini-pending-deletes',
+      names: next,
+    } satisfies StoredRemoteDeletes);
+    await txDone(tx);
+  } catch {
+    // best effort
+  }
+}
+
+export async function removePendingRemoteDelete(fileName: string): Promise<void> {
+  if (!fileName) return;
+  try {
+    const db = await openDb();
+    const tx = db.transaction(STORE_META, 'readwrite');
+    const store = tx.objectStore(STORE_META);
+    const existing = await reqToPromise<StoredRemoteDeletes | undefined>(
+      store.get('gemini-pending-deletes'),
+    );
+    if (!existing) return;
+    const next = existing.names.filter((n) => n !== fileName);
+    store.put({
+      key: 'gemini-pending-deletes',
+      names: next,
+    } satisfies StoredRemoteDeletes);
+    await txDone(tx);
+  } catch {
+    // best effort
+  }
 }

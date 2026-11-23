@@ -1,10 +1,12 @@
 export type RecordingStatus = 'queued' | 'processing' | 'ready' | 'failed';
 
-export type VaultSyncState = 'unsynced' | 'written' | 'conflict' | 'error';
+export type VaultSyncState = 'unsynced' | 'written' | 'conflict' | 'kept-vault' | 'error';
 
 export interface VaultExportState {
   vaultId: string;
   filename: string;
+  /** Target filename reserved prior to a rename write for crash-safe recovery */
+  pendingFilename?: string;
   audioWritten: boolean;
   lastExportedRevision: number;
   lastExportedHash: string;
@@ -52,6 +54,29 @@ export interface CapturedAudio {
   mimeType: string;
   durationSeconds: number;
   extension: string;
+  /** Draft ID in IndexedDB to clear once persisted to recordings/audio stores */
+  draftId?: string;
+}
+
+export interface RecordingDraft {
+  id: string;
+  created: string;
+  mimeType: string;
+  extension: string;
+  durationSeconds: number;
+  updatedAt: string;
+}
+
+export interface DraftChunkRecord {
+  key: string;
+  draftId: string;
+  seq: number;
+  blob: Blob;
+}
+
+export interface RecoverableDraft {
+  draft: RecordingDraft;
+  blob: Blob;
 }
 
 export interface StoredVaultHandle {
@@ -72,4 +97,9 @@ export interface VaultHistoryEntry {
 export interface StoredVaultHistory {
   key: 'obsidian-vault-history';
   entries: VaultHistoryEntry[];
+}
+
+export interface StoredRemoteDeletes {
+  key: 'gemini-pending-deletes';
+  names: string[];
 }
