@@ -1,8 +1,32 @@
 {
   "name": "tapeleaf",
   "version": "0.2.0",
+  "description": "Calm, zero-server, offline-first voice recorder PWA that transcribes with Gemini and writes Obsidian-ready Markdown notes and audio straight to your vault.",
+  "license": "MIT",
   "private": true,
   "type": "module",
+  "homepage": "https://kcverde.github.io/tapeleaf/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kcverde/tapeleaf.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kcverde/tapeleaf/issues"
+  },
+  "keywords": [
+    "obsidian",
+    "voice-notes",
+    "voice-recorder",
+    "pwa",
+    "offline-first",
+    "gemini",
+    "transcription",
+    "markdown",
+    "local-first"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
