@@ -324,7 +324,9 @@ export function classifyGeminiError(
   const raw = err instanceof Error ? err.message : String(err ?? 'Unknown error');
   const trimmed = raw.trim();
 
-  let code: number | undefined;
+  // The SDK keeps HTTP status on the error itself, including non-JSON failures.
+  const sdkStatus = err && typeof err === 'object' && 'status' in err ? err.status : undefined;
+  let code = typeof sdkStatus === 'number' ? sdkStatus : undefined;
   let status: string | undefined;
   let message = trimmed;
 
@@ -349,6 +351,17 @@ export function classifyGeminiError(
     }
   }
 
+  // Keep diagnostics in the existing saved error message so they are visible in
+  // the note and its Markdown export. Do not append raw response bodies or headers.
+  const details: string[] = [stage];
+  if (code !== undefined && Number.isInteger(code) && code >= 100 && code <= 599) {
+    details.push(`HTTP ${code}`);
+  }
+  if (status && /^[A-Z][A-Z_]{0,63}$/.test(status)) details.push(status);
+  if (errName === 'TimeoutError' || errName === 'AbortError') details.push(errName);
+  const classifiedError = (kind: GeminiErrorKind, explanation: string) =>
+    new GeminiClientError(kind, `${explanation} Details: ${details.join('; ')}.`);
+
   const lower = message.toLowerCase();
 
   // Stale lazy-chunk import after a new static deployment replaced hashed assets
@@ -363,7 +376,7 @@ export function classifyGeminiError(
         .then((reg) => reg?.update())
         .catch(() => {});
     }
-    return new GeminiClientError(
+    return classifiedError(
       'other',
       'Tapeleaf updated in the background. Tap Update or refresh the app, then tap Retry processing — your audio is safe.',
     );
@@ -375,7 +388,7 @@ export function classifyGeminiError(
     lower.includes('networkerror') ||
     lower.includes('load failed')
   ) {
-    return new GeminiClientError(
+    return classifiedError(
       'network',
       'Offline or Gemini unreachable. Your clip is queued and will retry automatically.',
     );
@@ -389,14 +402,14 @@ export function classifyGeminiError(
     lower.includes('api key not valid') ||
     lower.includes('api_key_invalid')
   ) {
-    return new GeminiClientError(
+    return classifiedError(
       'auth',
       'Gemini rejected your API key. Open Settings to check it, then tap Retry.',
     );
   }
 
   if (code === 429 || status === 'RESOURCE_EXHAUSTED' || lower.includes('quota')) {
-    return new GeminiClientError(
+    return classifiedError(
       'quota',
       'Gemini quota or rate limit reached. Queue paused — tap Retry in a moment.',
     );
@@ -411,7 +424,7 @@ export function classifyGeminiError(
     lower.includes('timeout')
   ) {
     const label = stage === 'upload' || stage === 'preparation' ? `audio ${stage}` : stage;
-    return new GeminiClientError(
+    return classifiedError(
       'transient',
       `Gemini ${label} timed out. Your audio is safe — keep Tapeleaf open and tap Retry.`,
     );
@@ -425,13 +438,13 @@ export function classifyGeminiError(
     lower.includes('high demand') ||
     lower.includes('temporarily unavailable')
   ) {
-    return new GeminiClientError(
+    return classifiedError(
       'transient',
       'Gemini is temporarily unavailable. Your audio is safe — tap Retry in a moment.',
     );
   }
 
-  return new GeminiClientError(
+  return classifiedError(
     'other',
     message.slice(0, 240) || 'Transcription failed. Tap Retry to try again.',
   );

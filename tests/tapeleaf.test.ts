@@ -577,6 +577,34 @@ describe('Gemini response validation and error classification', () => {
     assert.equal(classifyGeminiError(upload, 'transcription'), upload);
   });
 
+  it('retains the request stage and Gemini code/status in service failures', () => {
+    const error = classifyGeminiError(new Error(JSON.stringify({ error: {
+      code: 503, status: 'UNAVAILABLE', message: 'Service temporarily unavailable',
+    } })), 'transcription');
+    assert.equal(error.kind, 'transient');
+    assert.match(error.message, /Details: transcription; HTTP 503; UNAVAILABLE/);
+    assert.equal(classifyGeminiError(error, 'upload'), error);
+  });
+
+  it('reads HTTP status from SDK errors even without a JSON message', async () => {
+    const { ApiError } = await import('@google/genai');
+    const error = classifyGeminiError(new ApiError({
+      status: 500, message: 'Internal server error',
+    }), 'upload');
+    assert.equal(error.kind, 'transient');
+    assert.match(error.message, /Details: upload; HTTP 500/);
+  });
+
+  it('does not invent HTTP codes for local timeouts or include response payloads in diagnostics', () => {
+    const timeout = classifyGeminiError(new DOMException('expired', 'TimeoutError'), 'preparation');
+    assert.match(timeout.message, /Details: preparation; TimeoutError/);
+    assert.doesNotMatch(timeout.message, /HTTP/);
+    const error = classifyGeminiError(new Error(JSON.stringify({ error: {
+      code: 503, status: 'UNAVAILABLE', message: 'private payload should not be copied',
+    } })), 'upload');
+    assert.doesNotMatch(error.message, /private payload/);
+  });
+
   it('classifies auth, quota, timeout, and stale dynamic-import errors accurately', () => {
     assert.equal(
       classifyGeminiError(new Error(JSON.stringify({ error: { code: 401 } }))).kind,
